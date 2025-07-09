@@ -152,9 +152,9 @@ class Trainer:
             out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
             self._save_images(preds, out_path)
 
-    def train(self):
+    def train(self, start_epoch=0):
         """start training iterations"""
-        for epoch in range(cfg.SOLVER.EPOCHS):
+        for epoch in range(start_epoch,cfg.SOLVER.EPOCHS):
             self.data_loader.sampler.set_epoch(epoch)
             print(f"Epoch:{epoch} of process {dist.get_rank()}")
             dist.barrier()
@@ -198,4 +198,11 @@ class Trainer:
         pbar.set_postfix(mse='%.6f' % (loss))
 
     def _save_checkpoint(self, epoch):
-        torch.save(self.model.module.state_dict(), os.path.join(self.save_model_dir, str(epoch)+'-'+"ckpt.pt"))
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.module.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict()
+        }
+        ckpt_path = os.path.join(self.save_model_dir, f'{epoch}-ckpt.pt')
+        torch.save(checkpoint, ckpt_path)
+        print(f"✅ Saved checkpoint to {ckpt_path}")

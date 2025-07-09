@@ -58,32 +58,44 @@ def main(opt):
                                               pin_memory=True,
                                               num_workers=cfg.DATA_LOADER.NUM_THREADS,
                                               sampler=test_sampler)
-    
-    """build model architecture"""
+
+    # ----- 模型定義 -----
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
                      attention_resolutions=(1,1), channel_mult=(1, 1), num_heads=cfg.MODEL.NUM_HEADS, 
                      context_dim=cfg.MODEL.EMB_DIM).to(device)
-    
-    """load pretrained one_dm model"""
+
+    # ----- Pretrained 模型載入 -----
     if len(opt.one_dm) > 0:
         unet.load_state_dict(torch.load(opt.one_dm, map_location=torch.device('cpu')))
-        print('load pretrained one_dm model from {}'.format(opt.one_dm))
+        print('Loaded pretrained one_dm model from {}'.format(opt.one_dm))
 
     """load pretrained resnet18 model"""
     if len(opt.feat_model) > 0:
         checkpoint = torch.load(opt.feat_model, map_location=torch.device('cpu'))
         checkpoint['conv1.weight'] = checkpoint['conv1.weight'].mean(1).unsqueeze(1)
         miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
-        assert len(unexp) <= 32, "faile to load the pretrained model"
-        print('load pretrained model from {}'.format(opt.feat_model))
-    #test
-    """Initialize the U-Net model for parallel training on multiple GPUs"""
+        assert len(unexp) <= 32, "Failed to load the pretrained model"
+        print('Loaded pretrained resnet18 model from {}'.format(opt.feat_model))
+
+    optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
+
+    # ---- Resume Checkpoint if given ----
+    start_epoch = 400
+    if opt.resume_ckpt:
+        resume_data = torch.load(opt.resume_ckpt, map_location='cpu')
+    if 'model_state_dict' in resume_data:
+        unet.load_state_dict(resume_data['model_state_dict'])
+        optimizer.load_state_dict(resume_data['optimizer_state_dict'])
+        start_epoch = resume_data.get('epoch', 0) + 1
+        print(f"✅ Resumed from full checkpoint: {opt.resume_ckpt}, starting at epoch {start_epoch}")
+    else:
+        unet.load_state_dict(resume_data)
+        print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
+
     unet = DDP(unet, device_ids=[local_rank])
     """build criterion and optimizer"""
     criterion = dict(nce=SupConLoss(contrast_mode='all'), recon=nn.MSELoss())
-    optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
-
     diffusion = Diffusion(device=device, noise_offset=opt.noise_offset)
 
     vae = AutoencoderKL.from_pretrained(opt.stable_dif_path, subfolder="vae")
@@ -93,7 +105,9 @@ def main(opt):
 
     """build trainer"""
     trainer = Trainer(diffusion, unet, vae, criterion, optimizer, train_loader, logs, test_loader, device)
-    trainer.train()
+    
+    # 新增 start_epoch 給 Trainer 讓他知道從哪裡開始
+    trainer.train(start_epoch=start_epoch)
 
 if __name__ == '__main__':
     """Parse input arguments"""
@@ -108,5 +122,6 @@ if __name__ == '__main__':
     parser.add_argument('--noise_offset', default=0, type=float, help='control the strength of noise')
     parser.add_argument('--device', type=str, default='cuda', help='device for training')
     parser.add_argument('--local_rank', type=int, default=0, help='device for training')
+    parser.add_argument('--resume_ckpt', type=str, default='', help='Path to resume checkpoint (.pt)')
     opt = parser.parse_args()
     main(opt)
