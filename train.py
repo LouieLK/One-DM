@@ -77,7 +77,7 @@ def main(opt):
         miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
         assert len(unexp) <= 32, "faile to load the pretrained model"
         print('load pretrained model from {}'.format(opt.feat_model))
-    
+    #test
     """Initialize the U-Net model for parallel training on multiple GPUs"""
     unet = DDP(unet, device_ids=[local_rank])
     """build criterion and optimizer"""
