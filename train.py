@@ -81,17 +81,17 @@ def main(opt):
     optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
 
     # ---- Resume Checkpoint if given ----
-    start_epoch = 400
+    start_epoch = 0
     if opt.resume_ckpt:
         resume_data = torch.load(opt.resume_ckpt, map_location='cpu')
-    if 'model_state_dict' in resume_data:
-        unet.load_state_dict(resume_data['model_state_dict'])
-        optimizer.load_state_dict(resume_data['optimizer_state_dict'])
-        start_epoch = resume_data.get('epoch', 0) + 1
-        print(f"✅ Resumed from full checkpoint: {opt.resume_ckpt}, starting at epoch {start_epoch}")
-    else:
-        unet.load_state_dict(resume_data)
-        print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
+        if 'model_state_dict' in resume_data:
+            unet.load_state_dict(resume_data['model_state_dict'])
+            optimizer.load_state_dict(resume_data['optimizer_state_dict'])
+            start_epoch = resume_data.get('epoch', 0) + 1
+            print(f"✅ Resumed from full checkpoint: {opt.resume_ckpt}, starting at epoch {start_epoch}")
+        else:
+            unet.load_state_dict(resume_data)
+            print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
 
     unet = DDP(unet, device_ids=[local_rank])
     """build criterion and optimizer"""
