@@ -1,4 +1,5 @@
 __pycache__
+data_ch/*
 data/*
 Saved/*
 model_zoo/*.pth
