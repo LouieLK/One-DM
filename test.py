@@ -65,8 +65,13 @@ def main(opt):
     
     """load pretrained one_dm model"""
     if len(opt.one_dm) > 0: 
-        unet.load_state_dict(torch.load(f'{opt.one_dm}', map_location=torch.device('cpu')))
-        print('load pretrained one_dm model from {}'.format(opt.one_dm))
+        one_dm = torch.load(opt.one_dm, map_location=torch.device('cpu'))
+        if 'model_state_dict' in one_dm:
+            unet.load_state_dict(one_dm['model_state_dict'])
+            print(f"✅ Load from full checkpoint: {opt.one_dm}")
+        else:
+            unet.load_state_dict(torch.load(f'{opt.one_dm}', map_location=torch.device('cpu')))
+            print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.one_dm}")
     else:
         raise IOError('input the correct checkpoint path')
     unet.eval()
@@ -112,7 +117,11 @@ def main(opt):
                 image = im.convert("L")
                 out_path = os.path.join(target_dir, wid[index][0])
                 os.makedirs(out_path, exist_ok=True)
-                image.save(os.path.join(out_path, x_text + ".png"))
+                path = os.path.join(out_path, x_text + ".png")
+                try:
+                    image.save(path)
+                except:
+                    print(path)
 
 if __name__ == '__main__':
     """Parse input arguments"""
