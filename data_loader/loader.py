@@ -5,37 +5,40 @@ import torch
 import numpy as np
 import pickle
 from torchvision import transforms
-import lmdb
 from PIL import Image
 import torchvision
 import cv2
-from einops import rearrange, repeat
-import time
-import torch.nn.functional as F
 
-text_path = {'train':'data/IAM64_train.txt',
-             'test':'data/IAM64_test.txt'}
+class HandwritingDataset(Dataset):
+    _global_cfg = None 
 
-generate_type = {'iv_s':['train', 'data/in_vocab.subset.tro.37'],
-                'iv_u':['test', 'data/in_vocab.subset.tro.37'],
-                'oov_s':['train', 'data/oov.common_words'],
-                'oov_u':['test', 'data/oov.common_words']}
+    @classmethod
+    def set_global_config(cls, cfg):
+        """設定全域 Config，所有實例化物件皆可共用"""
+        cls._global_cfg = cfg
 
-# define the letters and the width of style image
-letters = '_Only thewigsofrcvdampbkuq.A-210xT5\'MDL,RYHJ"ISPWENj&BC93VGFKz();#:!7U64Q8?+*ZX/%'
-style_len = 352
+    def __init__(self, cfg=None, split='train', content_type='unifont'):
+        # 1. Config 解析
+        if cfg is not None:
+            self.cfg = cfg
+        elif self._global_cfg is not None:
+            self.cfg = self._global_cfg
+        else:
+            raise ValueError("Configuration not set! Call HandwritingDataset.set_global_config(cfg) first.")
 
-"""prepare the IAM dataset for training"""
-class IAMDataset(Dataset):
-    def __init__(self, image_path, style_path, laplace_path, type, content_type='unifont', max_len=9):
-        self.max_len = max_len
-        self.style_len = style_len
-        self.data_dict = self.load_data(text_path[type])
-        self.image_path = os.path.join(image_path, type)
-        self.style_path = os.path.join(style_path, type)
-        self.laplace_path = os.path.join(laplace_path, type)
+        ds_cfg = self.cfg['DATASET']
+        self.root = ds_cfg['ROOT']
+        self.letters = ds_cfg['LETTERS']
+        self.max_len = ds_cfg['MAX_LEN']
+        self.style_len = ds_cfg['STYLE_LEN']
+        
+        txt_path = os.path.join(self.root, ds_cfg['FILES'][split])
+        self.data_dict = self.load_data(txt_path)
+        # 2. 路徑設定
+        self.image_path = os.path.join(self.root, ds_cfg['DIRS']['IMAGE'],split)
+        self.style_path = os.path.join(self.root, ds_cfg['DIRS']['STYLE'],split)
+        self.laplace_path = os.path.join(self.root, ds_cfg['DIRS']['LAPLACE'],split)
 
-        self.letters = letters
         self.tokens = {"PAD_TOKEN": len(self.letters)}
         self.letter2index = {label: n for n, label in enumerate(self.letters)}
         self.indices = list(self.data_dict.keys())
@@ -92,7 +95,8 @@ class IAMDataset(Dataset):
         return new_style_images, new_laplace_images
 
     def get_symbols(self, input_type):
-        with open(f"data/{input_type}.pickle", "rb") as f:
+        pkl_path = os.path.join(self.root, f"{input_type}.pickle")
+        with open(pkl_path, "rb") as f:
             symbols = pickle.load(f)
 
         symbols = {sym['idx'][0]: sym['mat'].astype(np.float32) for sym in symbols}
@@ -128,12 +132,16 @@ class IAMDataset(Dataset):
         style_ref = torch.from_numpy(style_ref).to(torch.float32) # [2, h , w] achor and positive
         laplace_ref = torch.from_numpy(laplace_ref).to(torch.float32) # [2, h , w] achor and positive
 
+        try:
+            wid = int(wr_id)
+        except ValueError:
+            wid = 0
         return {'img':image,
                 'content':label, 
                 'style':style_ref,
                 "laplace":laplace_ref,
-                'wid':int(wr_id),
-                'transcr':transcr,
+                'wid':wid,
+                'transcr':label,
                 'image_name':image_name}
 
 

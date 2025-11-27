@@ -2,7 +2,7 @@ import argparse
 from parse_config import cfg, cfg_from_file, assert_and_infer_cfg
 from utils.util import fix_seed, load_specific_dict
 from utils.logger import set_log
-from data_loader.loader import IAMDataset
+from data_loader.loader import HandwritingDataset 
 import torch
 from trainer.trainer import Trainer
 from models.unet import UNetModel
@@ -32,10 +32,13 @@ def main(opt):
     torch.cuda.set_device(local_rank)
     device = torch.device(opt.device, local_rank)
     
+    # [修改] 1. 設定全域 Config
+    HandwritingDataset.set_global_config(cfg)
 
     """ set dataset"""
-    train_dataset = IAMDataset(
-        cfg.DATA_LOADER.IAMGE_PATH, cfg.DATA_LOADER.STYLE_PATH, cfg.DATA_LOADER.LAPLACE_PATH, cfg.TRAIN.TYPE)
+    # [修改] 2. 移除路徑參數，改用 split
+    train_dataset = HandwritingDataset(split=cfg.TRAIN.TYPE)
+    
     print('number of training images: ', len(train_dataset))
     train_sampler = DistributedSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(train_dataset,
@@ -47,8 +50,8 @@ def main(opt):
                                                sampler=train_sampler)
     
     
-    test_dataset = IAMDataset(
-         cfg.DATA_LOADER.IAMGE_PATH, cfg.DATA_LOADER.STYLE_PATH, cfg.DATA_LOADER.LAPLACE_PATH, cfg.TEST.TYPE)
+    # [修改] 3. 測試集同理
+    test_dataset = HandwritingDataset(split=cfg.TEST.TYPE)
     test_sampler = DistributedSampler(test_dataset)
 
     test_loader = torch.utils.data.DataLoader(test_dataset,

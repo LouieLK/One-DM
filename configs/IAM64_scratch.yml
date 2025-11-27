@@ -6,12 +6,14 @@ MODEL:
   NUM_RES_BLOCKS: 1
   NUM_HEADS: 4
   EMB_DIM: 512
+
 SOLVER:
   BASE_LR: 0.0001
   EPOCHS: 1000
   WARMUP_ITERS: 20000
   TYPE: AdamW  # TODO, support optional optimizer
   GRAD_L2_CLIP: 5.0
+
 TRAIN:
   TYPE: train
   IMS_PER_BATCH: 96
@@ -22,13 +24,39 @@ TRAIN:
   SEED: 1001
   IMG_H: 64
   IMG_W: 64
+
 TEST:
   TYPE: test
   IMS_PER_BATCH: 32
   IMG_H: 64
   IMG_W: 64
+
 DATA_LOADER:
   NUM_THREADS: 8
-  IAMGE_PATH: ./data/IAM64-new
-  STYLE_PATH: ./data/IAM64-new
-  LAPLACE_PATH: ./data/IAM64_laplace
+
+# === 資料集設定整合區 ===
+DATASET:
+  # 資料集根目錄 (所有子路徑都將基於此路徑)
+  ROOT: './data' 
+  
+  # 字母表 (原有 loader 中的 letters)
+  LETTERS: "_Only thewigsofrcvdampbkuq.A-210xT5'MDL,RYHJ\"ISPWENj&BC93VGFKz();#:!7U64Q8?+*ZX/%"  
+  
+  # 參數設定
+  STYLE_LEN: 352 # 圖片最大長度
+  MAX_LEN: 9 # 圖片最大包含字數
+  
+  # 資料夾路徑 (相對於 ROOT)
+  DIRS:
+    IMAGE: 'IAM64-new'
+    STYLE: 'IAM64-new'
+    LAPLACE: 'IAM64_laplace'
+  
+  # 標籤檔案路徑 (相對於 ROOT)
+  FILES:
+    train: 'IAM64_train.txt'
+    test: 'IAM64_test.txt'
+    iv_s: 'in_vocab.subset.tro.37'
+    iv_u: 'in_vocab.subset.tro.37'
+    oov_s: 'oov.common_words'
+    oov_u: 'oov.common_words'
