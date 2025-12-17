@@ -2,7 +2,7 @@ __pycache__
 data_ch/*
 data/*
 Saved/*
-model_zoo/*.pth
+model_zoo/*
 auto_*
 static/*
 files/*
@@ -10,3 +10,10 @@ files/*
 Generated/*
 LICENSE
 *.sh
+legacy/*
+One_DM.egg-info/*
+ch.txt
+do_this_first.txt
+eng.txt
+fid_folder/*
+uv.lock
