@@ -96,13 +96,37 @@ __C.DATA_LOADER = AttrDict()
 # training; 4 seems to be the sweet spot in our experience)
 __C.DATA_LOADER.NUM_THREADS = 8
 
+# [Legacy] Keep these to avoid errors if referenced, though DATASET is now preferred
 __C.DATA_LOADER.TXT_PATH = ''
-
-__C.DATA_LOADER.IAMGE_PATH = ''
-
+__C.DATA_LOADER.IAMGE_PATH = '' # Original typo preserved for compatibility
 __C.DATA_LOADER.STYLE_PATH = ''
-
 __C.DATA_LOADER.LAPLACE_PATH = ''
+
+# ---------------------------------------------------------------------------- #
+# Dataset options (New Structure for Unified Loader)
+# ---------------------------------------------------------------------------- #
+__C.DATASET = AttrDict()
+__C.DATASET.NAME = ''
+__C.DATASET.ROOT = ''
+__C.DATASET.LETTERS = ''
+__C.DATASET.STYLE_LEN = 64
+__C.DATASET.MAX_LEN = 1
+__C.DATASET.MIN_STYLE_WIDTH = 0 # Default 0 means no filtering or use 128 as fallback
+
+__C.DATASET.DIRS = AttrDict()
+__C.DATASET.DIRS.IMAGE = ''
+__C.DATASET.DIRS.STYLE = ''
+__C.DATASET.DIRS.LAPLACE = ''
+
+__C.DATASET.FILES = AttrDict()
+# Pre-define common keys to pass strict merge check
+__C.DATASET.FILES.train = ''
+__C.DATASET.FILES.test = ''
+__C.DATASET.FILES.iv_s = ''
+__C.DATASET.FILES.iv_u = ''
+__C.DATASET.FILES.oov_s = ''
+__C.DATASET.FILES.oov_u = ''
+
 
 # ---------------------------------------------------------------------------- #
 # Inference ('test') options

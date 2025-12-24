@@ -10,6 +10,7 @@ from tqdm import tqdm
 from data_loader.loader import ContentData
 import torch.distributed as dist
 import torch.nn.functional as F
+import random
 
 class Trainer:
     def __init__(self, diffusion, unet, vae, criterion, optimizer, data_loader, 
@@ -52,10 +53,15 @@ class Trainer:
         predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
         # calculate loss
         recon_loss = self.recon_criterion(predicted_noise, noise)
-        high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
-        low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
-        loss = recon_loss + high_nce_loss + low_nce_loss
-
+        
+        # ================= [關鍵修改] =================
+        # 將 labels 設為 None，啟用自監督模式 (SimCLR)
+        # 模型會拉近同一張圖的兩個增強視圖，推開不同圖的視圖
+        high_nce_loss = self.nce_criterion(high_nce_emb, labels=None)
+        low_nce_loss = self.nce_criterion(low_nce_emb, labels=None)
+        # ============================================
+        
+        loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
         # backward and update trainable parameters
         self.optimizer.zero_grad()
         loss.backward()
@@ -100,8 +106,12 @@ class Trainer:
         rec_out = self.ocr_model(x_start)
         input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
         ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target, input_lengths, target_lengths)
-        high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
-        low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
+        # === [修改點] 這裡同樣需要啟用自監督模式 ===
+        # 原本: labels=wid
+        # 修改: labels=None
+        high_nce_loss = self.nce_criterion(high_nce_emb, labels=None)
+        low_nce_loss = self.nce_criterion(low_nce_emb, labels=None)
+        # =========================================
         loss = recon_loss + high_nce_loss + low_nce_loss + 0.1*ctc_loss
 
         # backward and update trainable parameters
@@ -151,6 +161,63 @@ class Trainer:
             preds = self.diffusion.ddim_sample(self.model, self.vae, images.shape[0], x, style_ref, laplace_ref, text_ref)
             out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
             self._save_images(preds, out_path)
+    # @torch.no_grad()
+    # def _valid_iter(self, epoch):
+    #     print('loading test dataset, the number is', len(self.valid_data_loader))
+    #     self.model.eval()
+        
+    #     test_loader_iter = iter(self.valid_data_loader)
+    #     test_data = next(test_loader_iter)
+        
+    #     # 準備資料
+    #     images, style_ref_pair, laplace_ref_pair, content_ref = test_data['img'].to(self.device), \
+    #         test_data['style'].to(self.device), \
+    #         test_data['laplace'].to(self.device), \
+    #         test_data['content'].to(self.device)
+    
+    #     # 1. 選取 View 1 作為風格參考
+    #     style_ref = style_ref_pair[:, 1:2]     # Shape: [Batch, 1, 64, 64] (CUDA)
+    #     laplace_ref = laplace_ref_pair[:, 1:2] # Shape: [Batch, 1, 64, 64] (CUDA)
+
+    #     # 2. 準備隨機文字
+    #     load_content = ContentData()
+    #     if hasattr(load_content, 'letters') and len(load_content.letters) >= 3:
+    #         selected_texts = random.sample(load_content.letters, 3)
+    #     else:
+    #         selected_texts = ['永', '和', '國']
+            
+    #     print(f"Validation Generating Texts: {selected_texts}")
+
+    #     for text in selected_texts:
+    #         rank = dist.get_rank()
+    #         try:
+    #             text_ref = load_content.get_content(text)
+    #         except KeyError as e:
+    #             print(f"Warning: Character {text} not in dictionary, skipping...")
+    #             continue
+
+    #         text_ref = text_ref.to(self.device).repeat(style_ref.shape[0], 1, 1, 1)
+            
+    #         # 設定寬度為 64 (符合中文字)
+    #         x = torch.randn((text_ref.shape[0], 4, style_ref.shape[2]//8, (text_ref.shape[1]*64)//8)).to(self.device)
+            
+    #         # 3. 執行生成 (preds 會回傳 CPU Tensor, 數值範圍 0~1)
+    #         preds = self.diffusion.ddim_sample(self.model, self.vae, images.shape[0], x, style_ref, laplace_ref, text_ref)
+            
+    #         # 4. [修正] 處理 style_ref 以便拼接
+    #         #   a. 搬移到 CPU (因為 preds 在 CPU)
+    #         #   b. 反正規化: -1~1 -> 0~1 (因為 preds 已經是 0~1)
+    #         style_ref_cpu = style_ref.cpu()
+    #         style_ref_cpu = (style_ref_cpu * 0.5 + 0.5).clamp(0, 1)
+    #         if style_ref_cpu.shape[1] == 1:
+    #             style_ref_cpu = style_ref_cpu.repeat(1, 3, 1, 1)
+    #         # 5. 製作對照圖：[參考圖 | 生成圖]
+    #         # 現在兩者都在 CPU 且都是 0~1，可以直接拼接
+    #         comparison = torch.cat([style_ref_cpu, preds], dim=3)
+            
+    #         # 6. 儲存 (不需要再做反正規化了)
+    #         out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
+    #         self._save_images(comparison, out_path)
 
     def train(self, start_epoch=0):
         """start training iterations"""
