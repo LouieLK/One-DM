@@ -54,12 +54,8 @@ class Trainer:
         # calculate loss
         recon_loss = self.recon_criterion(predicted_noise, noise)
         
-        # ================= [關鍵修改] =================
-        # 將 labels 設為 None，啟用自監督模式 (SimCLR)
-        # 模型會拉近同一張圖的兩個增強視圖，推開不同圖的視圖
-        high_nce_loss = self.nce_criterion(high_nce_emb, labels=None)
-        low_nce_loss = self.nce_criterion(low_nce_emb, labels=None)
-        # ============================================
+        high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
+        low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
         
         loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
         # backward and update trainable parameters
@@ -106,12 +102,8 @@ class Trainer:
         rec_out = self.ocr_model(x_start)
         input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
         ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target, input_lengths, target_lengths)
-        # === [修改點] 這裡同樣需要啟用自監督模式 ===
-        # 原本: labels=wid
-        # 修改: labels=None
-        high_nce_loss = self.nce_criterion(high_nce_emb, labels=None)
-        low_nce_loss = self.nce_criterion(low_nce_emb, labels=None)
-        # =========================================
+        high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
+        low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
         loss = recon_loss + high_nce_loss + low_nce_loss + 0.1*ctc_loss
 
         # backward and update trainable parameters
@@ -137,30 +129,31 @@ class Trainer:
         im.save(path)
         return im
 
-    @torch.no_grad()
-    def _valid_iter(self, epoch):
-        print('loading test dataset, the number is', len(self.valid_data_loader))
-        self.model.eval()
-        # use the first batch of dataloader in all validations for better visualization comparisons
-        test_loader_iter = iter(self.valid_data_loader)
-        test_data = next(test_loader_iter)
-        # prepare input
-        images, style_ref, laplace_ref, content_ref = test_data['img'].to(self.device), \
-            test_data['style'].to(self.device), \
-            test_data['laplace'].to(self.device), \
-            test_data['content'].to(self.device)
+    # @torch.no_grad()
+    # def _valid_iter(self, epoch):
+    #     print('loading test dataset, the number is', len(self.valid_data_loader))
+    #     self.model.eval()
+    #     # use the first batch of dataloader in all validations for better visualization comparisons
+    #     test_loader_iter = iter(self.valid_data_loader)
+    #     test_data = next(test_loader_iter)
+    #     # prepare input
+    #     images, style_ref, laplace_ref, content_ref = test_data['img'].to(self.device), \
+    #         test_data['style'].to(self.device), \
+    #         test_data['laplace'].to(self.device), \
+    #         test_data['content'].to(self.device)
     
-        load_content = ContentData()
-        # forward
-        texts = ['getting', 'both', 'success']
-        for text in texts:
-            rank = dist.get_rank()
-            text_ref = load_content.get_content(text)
-            text_ref = text_ref.to(self.device).repeat(style_ref.shape[0], 1, 1, 1)
-            x = torch.randn((text_ref.shape[0], 4, style_ref.shape[2]//8, (text_ref.shape[1]*32)//8)).to(self.device)
-            preds = self.diffusion.ddim_sample(self.model, self.vae, images.shape[0], x, style_ref, laplace_ref, text_ref)
-            out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
-            self._save_images(preds, out_path)
+    #     load_content = ContentData()
+    #     # forward
+    #     texts = ['getting', 'both', 'success']
+    #     for text in texts:
+    #         rank = dist.get_rank()
+    #         text_ref = load_content.get_content(text)
+    #         text_ref = text_ref.to(self.device).repeat(style_ref.shape[0], 1, 1, 1)
+    #         x = torch.randn((text_ref.shape[0], 4, style_ref.shape[2]//8, (text_ref.shape[1]*32)//8)).to(self.device)
+    #         preds = self.diffusion.ddim_sample(self.model, self.vae, images.shape[0], x, style_ref, laplace_ref, text_ref)
+    #         out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
+    #         self._save_images(preds, out_path)
+
     # @torch.no_grad()
     # def _valid_iter(self, epoch):
     #     print('loading test dataset, the number is', len(self.valid_data_loader))
@@ -181,10 +174,8 @@ class Trainer:
 
     #     # 2. 準備隨機文字
     #     load_content = ContentData()
-    #     if hasattr(load_content, 'letters') and len(load_content.letters) >= 3:
-    #         selected_texts = random.sample(load_content.letters, 3)
-    #     else:
-    #         selected_texts = ['永', '和', '國']
+    #     if hasattr(load_content, 'letters') and len(load_content.letters) >= 5:
+    #         selected_texts = random.sample(load_content.letters, 5)
             
     #     print(f"Validation Generating Texts: {selected_texts}")
 
@@ -218,6 +209,84 @@ class Trainer:
     #         # 6. 儲存 (不需要再做反正規化了)
     #         out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
     #         self._save_images(comparison, out_path)
+
+    @torch.no_grad()
+    def _valid_iter(self, epoch):
+        print('loading test dataset, the number is', len(self.valid_data_loader))
+        self.model.eval()
+        
+        # 1. 取得一個 Batch 的測試資料
+        test_loader_iter = iter(self.valid_data_loader)
+        test_data = next(test_loader_iter)
+        
+        # 準備資料
+        # 注意: 這裡假設 loader 讀進來的 style 已經是 [B, 2, 64, 64] (因為有 View 1 & View 2)
+        images = test_data['img'].to(self.device)
+        style_ref_pair = test_data['style'].to(self.device)
+        laplace_ref_pair = test_data['laplace'].to(self.device)
+        
+        # 取出第一張 View 作為參考圖 [Batch, 1, 64, 64]
+        style_ref = style_ref_pair[:, 0:1, :, :] 
+        laplace_ref = laplace_ref_pair[:, 0:1, :, :]
+
+        # 2. 準備要生成的文字列表
+        load_content = ContentData()
+        # 這裡可以自訂想要測試的字，或者隨機選取
+        if hasattr(load_content, 'letters') and len(load_content.letters) >= 5:
+            # 隨機選 5 個字來測試
+            selected_texts = random.sample(load_content.letters, 5) 
+        else:
+            # 如果讀不到 letters，就用預設的
+            selected_texts = ['永', '和', '九', '年', '歲']
+
+        print(f"Validation Generating Texts: {selected_texts}")
+
+        for text in selected_texts:
+            rank = dist.get_rank()
+            
+            # 取得 Content Reference (字形內容)
+            try:
+                text_ref = load_content.get_content(text)
+            except KeyError:
+                print(f"Warning: Character {text} not in dictionary, skipping...")
+                continue
+
+            # 複製 Content Ref 以符合 Batch Size
+            text_ref = text_ref.to(self.device).repeat(style_ref.shape[0], 1, 1, 1)
+            
+            # 3. 建立初始雜訊 x_T
+            # 因為資料集固定為 64x64，且 U-Net 下採樣 8 倍 (2^3)，所以 Latent Size 為 8x8
+            h_latent = 64 // 8
+            w_latent = 64 // 8
+            x = torch.randn((text_ref.shape[0], 4, h_latent, w_latent)).to(self.device)
+            
+            # 4. 執行生成 (DDIM Sampling)
+            # preds 數值範圍通常為 0~1 (視 model 輸出而定)
+            preds = self.diffusion.ddim_sample(self.model, self.vae, images.shape[0], x, style_ref, laplace_ref, text_ref)
+            
+            # 5. 製作對照圖 (Style Ref | Generated Image)
+            
+            # 處理 Style Image (搬到 CPU, 反正規化)
+            style_vis = style_ref.cpu()
+            # 假設輸入時有做 Normalize(0.5, 0.5)，這裡還原回 0~1
+            style_vis = (style_vis * 0.5 + 0.5).clamp(0, 1)
+            
+            # [關鍵修正] 確保通道數一致
+            # 如果生成圖是 RGB (3通道)，但風格圖是灰階 (1通道)，將風格圖複製成 3 通道
+            if preds.shape[1] == 3 and style_vis.shape[1] == 1:
+                style_vis = style_vis.repeat(1, 3, 1, 1)
+            
+            # 確保高度一致 (理論上都是 64，但為了安全起見)
+            if style_vis.shape[2] != preds.shape[2] or style_vis.shape[3] != preds.shape[3]:
+                 style_vis = torch.nn.functional.interpolate(style_vis, size=(preds.shape[2], preds.shape[3]), mode='bilinear')
+
+            # 左右拼接 (dim=3 是寬度方向)
+            comparison = torch.cat([style_vis, preds.cpu()], dim=3)
+            
+            # 6. 存檔
+            out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
+            self._save_images(comparison, out_path)
+            # print(f"Saved validation image to {out_path}")
 
     def train(self, start_epoch=0):
         """start training iterations"""
