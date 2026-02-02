@@ -117,6 +117,7 @@ __C.DATASET.DIRS = AttrDict()
 __C.DATASET.DIRS.IMAGE = ''
 __C.DATASET.DIRS.STYLE = ''
 __C.DATASET.DIRS.LAPLACE = ''
+__C.DATASET.DIRS.LATENT = ''
 
 __C.DATASET.FILES = AttrDict()
 # Pre-define common keys to pass strict merge check

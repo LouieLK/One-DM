@@ -107,30 +107,57 @@ class Diffusion:
         return x, noise_list[0], high_nce_emb, low_nce_emb
 
     @torch.no_grad()
-    def ddim_sample(self, model, vae, n, x, styles, laplace, content, sampling_timesteps=50, eta=0):
+    def ddim_sample(self, model, vae, n, x, styles, laplace, content, sampling_timesteps=50, eta=0, guidance_scale=2.0):
         model.eval()
 
         total_timesteps, sampling_timesteps = self.noise_steps, sampling_timesteps
-        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+        time_pairs = list(zip(times[:-1], times[1:]))
         x_start = None
 
         for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
-            time = (torch.ones(n) * time).long().to(self.device)
-            time_next = (torch.ones(n) * time_next).long().to(self.device)
-            predicted_noise = model(x, time, styles, laplace, content)
+            # 1. 準備 Tensor (給模型 forward 用)
+            time_tensor = (torch.ones(n) * time).long().to(self.device)
+            # time_next_tensor = (torch.ones(n) * time_next).long().to(self.device) # 其實這裡好像沒用到 time_next_tensor 給模型，只有算 alpha 需要
 
-            beta = self.beta[time][:, None, None, None]
-            alpha_hat = self.alpha_hat[time][:, None, None, None]
-            alpha_hat_next = self.alpha_hat[time_next][:, None, None, None]
+            # 2. 模型預測 (CFG)
+            # 有條件
+            cond_noise = model(x, time_tensor, styles, laplace, content, tag='test')
+
+            # 無條件與混合
+            if guidance_scale != 1.0:
+                uncond_styles = torch.zeros_like(styles)
+                uncond_laplace = torch.zeros_like(laplace)
+                uncond_noise = model(x, time_tensor, uncond_styles, uncond_laplace, content, tag='test')
+                predicted_noise = uncond_noise + guidance_scale * (cond_noise - uncond_noise)
+            else:
+                predicted_noise = cond_noise
             
+            # 3. 準備參數 (使用 scalar int 進行索引，避免 IndexError)
+            # 注意：這裡直接用 time_tensor 索引，確保維度是 (B, 1, 1, 1)
+            beta = self.beta[time_tensor][:, None, None, None]
+            alpha_hat = self.alpha_hat[time_tensor][:, None, None, None]
+            
+            # 對於 alpha_hat_next，我們需要一個 time_next 的 tensor
+            time_next_tensor_for_idx = (torch.ones(n) * time_next).long().to(self.device)
+            # 如果 time_next 是 -1，alpha_hat_next 應該要處理 (雖然下面有 if time_next < 0 continue，但避免索引負值報錯)
+            if time_next < 0:
+                 # 當 time_next < 0，我們其實不需要 alpha_hat_next，因為迴圈會 continue
+                 # 但為了避免程式在計算这一行時報錯，我們先給它 time_tensor 的值 (反正後面不會用到)
+                 alpha_hat_next = alpha_hat 
+            else:
+                 alpha_hat_next = self.alpha_hat[time_next_tensor_for_idx][:, None, None, None]
+            
+            # 4. 預測 x_start
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
 
-            if time_next[0] < 0:
+            # 5. 結束條件判斷 (修正處：移除 [0])
+            if time_next < 0:
                 x = x_start
                 continue
             
+            # 6. DDIM 更新步驟
             sigma = eta * (beta * (1 - alpha_hat_next) / (1 - alpha_hat)).sqrt()
             c = (1 - alpha_hat_next - sigma ** 2).sqrt()
 

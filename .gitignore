@@ -17,3 +17,6 @@ do_this_first.txt
 eng.txt
 fid_folder/*
 uv.lock
+results/*
+pytorchocr/*
+arcface/*

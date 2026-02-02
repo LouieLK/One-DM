@@ -158,7 +158,7 @@ def main(opt):
             unet.load_state_dict(resume_data)
             print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
 
-    unet = DDP(unet, device_ids=[local_rank])
+    unet = DDP(unet, device_ids=[local_rank],find_unused_parameters=True)
     """build criterion and optimizer"""
     criterion = dict(nce=SupConLoss(contrast_mode='all'), recon=nn.MSELoss())
     diffusion = Diffusion(device=device, noise_offset=opt.noise_offset)
