@@ -84,6 +84,34 @@ class Mix_TR(nn.Module):
     def get_high_style_feature(self, laplace):
         return self.process_style_feature(self.freq_encoder, self.freq_dilation_layer, laplace, self.add_position2D, self.fre_encoder)
 
+    # === [新增] Helper for Flow Training: 提取未壓縮的 512-dim 向量 ===
+    def get_style_vectors(self, style, laplace):
+        """
+        提取用於訓練 Normalizing Flow 的特徵向量。
+        這裡回傳的是 Global Average Pooling 後的 512 維特徵 (Pre-MLP)，
+        確保維度與 d_model (512) 一致，供 Decoder 直接使用。
+        """
+        # 處理圖片輸入
+        if style.shape[1] == 1:
+            anchor_style = style
+            anchor_high = laplace
+        else:
+            anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
+            anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
+
+        # 1. High Freq Feature
+        anchor_high_feature = self.get_high_style_feature(anchor_high) # Shape: [T, N, 512]
+        high_vec = torch.mean(anchor_high_feature, dim=0) # Shape: [N, 512]
+
+        # 2. Low Freq Feature
+        anchor_low = anchor_style
+        anchor_low_feature = self.get_low_style_feature(anchor_low)
+        anchor_mask = self.low_feature_filter(anchor_low_feature)
+        anchor_low_feature = anchor_low_feature * anchor_mask # Apply filter
+        low_vec = torch.mean(anchor_low_feature, dim=0) # Shape: [N, 512]
+        
+        return low_vec, high_vec
+
     
     def forward(self, style, laplace, content):
         # get the high frequency and style feature
@@ -134,27 +162,52 @@ class Mix_TR(nn.Module):
         
         return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
     
+    # === [修改] 支援向量輸入 ===
     def generate(self, style, laplace, content):
-        if style.shape[1] == 1:
-            anchor_style = style
-            anchor_high = laplace
-        else:
-            anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
-            anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
+        """
+        支援兩種模式:
+        1. 圖片輸入 (Training/Test): 輸入 [N, C, H, W] -> 走完整 CNN Encoder 流程
+        2. 向量輸入 (Random Sampling): 輸入 [N, 512] -> 直接進入 Decoder
+        """
         
-        # get the highg frequency and style feature
-        anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
-        # get the low frequency and style feature
-        anchor_low = anchor_style
-        anchor_low_feature = self.get_low_style_feature(anchor_low)
-        anchor_mask = self.low_feature_filter(anchor_low_feature)
-        anchor_low_feature = anchor_low_feature * anchor_mask
+        # 判斷輸入是否為向量 (N, 512)
+        is_vector_input = (style.dim() == 2)
 
-        # content encoder
+        if is_vector_input:
+            # === Mode 2: Vector Input (from Flow) ===
+            # style 和 laplace 已經是 [N, 512] 的向量
+            # Decoder 需要 Sequence 輸入 [T, N, C]，所以我們將其 unsqueeze 成 [1, N, 512]
+            # 這樣 Transformer 會把它當作長度為 1 的 Global Token 進行 Attention
+            anchor_low_feature = style.unsqueeze(0)  # [1, N, 512]
+            anchor_high_feature = laplace.unsqueeze(0) # [1, N, 512]
+            
+            # 注意：這裡不需要再過 low_feature_filter，因為 Flow 訓練時使用的 target 
+            # 已經是經過 filter 和 averaging 的向量 (參見 get_style_vectors)
+            
+        else:
+            # === Mode 1: Image Input (Original) ===
+            if style.shape[1] == 1:
+                anchor_style = style
+                anchor_high = laplace
+            else:
+                anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
+                anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
+            
+            # get the high frequency style feature
+            anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
+            
+            # get the low frequency style feature
+            anchor_low = anchor_style
+            anchor_low_feature = self.get_low_style_feature(anchor_low)
+            anchor_mask = self.low_feature_filter(anchor_low_feature)
+            anchor_low_feature = anchor_low_feature * anchor_mask
+
+        # content encoder (保持不變)
         content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
         content = self.content_encoder(content)
         content = rearrange(content, '(n t) c h w ->t n (c h w)', n=style.shape[0]).contiguous() # n is batch size
         content = self.add_position1D(content)
+        
         # fusion of content and style features
         style_hs = self.decoder(content, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
