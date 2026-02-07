@@ -63,8 +63,8 @@ class ResNet(nn.Module):
         self.conv1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(3,2,1))
+            nn.ReLU(inplace=True))
+            # nn.MaxPool2d(3,2,1))
         #we use a different inputsize than the original paper
         #so conv2_x's stride is 1
         self.conv2_x = self._make_layer(block, 64, num_block[0], 1)

@@ -11,6 +11,7 @@ from data_loader.loader import ContentData
 import torch.distributed as dist
 import torch.nn.functional as F
 import random
+from torch.cuda.amp import autocast, GradScaler
 
 class Trainer:
     def __init__(self, diffusion, unet, vae, criterion, optimizer, data_loader, 
@@ -29,7 +30,8 @@ class Trainer:
         self.ocr_model = ocr_model
         self.ctc_criterion = ctc_loss
         self.device = device
-      
+        self.scaler = GradScaler()
+
     def _train_iter(self, data, step, pbar):
         self.model.train()
         # prepare input
@@ -56,27 +58,36 @@ class Trainer:
         # forward
         t = self.diffusion.sample_timesteps(images.shape[0]).to(self.device)
         x_t, noise = self.diffusion.noise_images(images, t)
-        
-       
-        predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
-        # calculate loss
-        recon_loss = self.recon_criterion(predicted_noise, noise)
-        
-        if is_unconditional:
-            # 如果是無條件輸入，我們不應該懲罰風格特徵
-            # 因為輸入是空的，輸出的 embedding 也是無意義的，不能拿來對齊 Writer ID
-            high_nce_loss = torch.tensor(0.0, device=self.device)
-            low_nce_loss = torch.tensor(0.0, device=self.device)
-        else:
-            # 只有在有風格輸入時，才計算風格損失
-            high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
-            low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
-        
-        loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
-        # backward and update trainable parameters
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        
+        with autocast():
+            predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
+            # calculate loss
+            recon_loss = self.recon_criterion(predicted_noise, noise)
+        
+            if is_unconditional:
+                # 如果是無條件輸入，我們不應該懲罰風格特徵
+                # 因為輸入是空的，輸出的 embedding 也是無意義的，不能拿來對齊 Writer ID
+                high_nce_loss = torch.tensor(0.0, device=self.device)
+                low_nce_loss = torch.tensor(0.0, device=self.device)
+            else:
+                # 只有在有風格輸入時，才計算風格損失
+                high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
+                low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
+        
+            loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
+
+        self.scaler.scale(loss).backward()
+
+        if cfg.SOLVER.GRAD_L2_CLIP > 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.SOLVER.GRAD_L2_CLIP)
+
+        # backward and update trainable parameters
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        # loss.backward()
+        # self.optimizer.step()
 
         if dist.get_rank() == 0:
             # log file

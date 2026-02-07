@@ -779,7 +779,7 @@ class UNetModel(nn.Module):
         )
         if backbone_type == 'mamba':
             from models.mamba_fusion import MambaStyleFusion
-            self.mix_net = MambaStyleFusion(d_model=context_dim,num_decoder_layers=6)
+            self.mix_net = MambaStyleFusion(d_model=context_dim,num_decoder_layers=3)
             print(f"🐍 Using Vision Mamba (Vim) Backbone! Dim={context_dim}")
         else:
             self.mix_net = Mix_TR(d_model=context_dim)

@@ -47,6 +47,9 @@ def main(opt):
                                                collate_fn=train_dataset.collate_fn_,
                                                num_workers=cfg.DATA_LOADER.NUM_THREADS,
                                                pin_memory=True,
+                                               # [新增] 預取更多 batch，讓 CPU 跑在 GPU 前面
+                                               prefetch_factor=4, 
+                                               persistent_workers=True, # [新增] 避免每個 Epoch 重啟 worker
                                                sampler=train_sampler)
     
     
@@ -75,73 +78,86 @@ def main(opt):
 
     """load pretrained resnet18 model"""
     if len(opt.feat_model) > 0:
+        print(f'🚀 Loading Style Encoder from: {opt.feat_model}')
         checkpoint = torch.load(opt.feat_model, map_location=torch.device('cpu'))
-        checkpoint['conv1.weight'] = checkpoint['conv1.weight'].mean(1).unsqueeze(1)
-        miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
-        assert len(unexp) <= 32, "Failed to load the pretrained model"
-        print('Loaded pretrained resnet18 model from {}'.format(opt.feat_model))
-
-    # """load pretrained resnet18 model (Custom Mapping for backbone.x -> conv1/layer1...)"""
-    # if len(opt.feat_model) > 0:
-    #     print(f'Loading pretrained style encoder from {opt.feat_model} ...')
-    #     checkpoint = torch.load(opt.feat_model, map_location=torch.device('cpu'))
         
-    #     # 處理可能的 state_dict 包裝
-    #     if 'state_dict' in checkpoint:
-    #         checkpoint = checkpoint['state_dict']
+        if 'state_dict' in checkpoint:
+            checkpoint = checkpoint['state_dict']
 
-    #     # 定義翻譯字典：將 Sequential 的索引映射回 ResNet 的標準名稱
-    #     # 根據您的 inspect 結果：
-    #     # backbone.0 -> conv1
-    #     # backbone.1 -> bn1
-    #     # backbone.4 -> layer1
-    #     # backbone.5 -> layer2
-    #     # backbone.6 -> layer3
-    #     # backbone.7 -> layer4 (雖然 One-DM 不用 layer4，但載入也無妨)
-    #     name_mapping = {
-    #         'backbone.0.': 'conv1.',
-    #         'backbone.1.': 'bn1.',
-    #         'backbone.4.': 'layer1.',
-    #         'backbone.5.': 'layer2.',
-    #         'backbone.6.': 'layer3.',
-    #         'backbone.7.': 'layer4.'
-    #     }
+        new_state_dict = {}
+        for k, v in checkpoint.items():
+            if 'fc' in k: continue # 跳過 fc
+            
+            new_k = k
+            if new_k.startswith('module.'): new_k = new_k[7:]
+            
+            # === 關鍵修正：映射到 residual_function ===
+            # 標準 ResNet -> ResNet Dilation
+            # layer1 -> conv2_x
+            # layer2 -> conv3_x
+            # layer3 -> conv4_x
+            # layer4 -> conv5_x
+            
+            if 'layer1' in new_k: 
+                new_k = new_k.replace('layer1', 'conv2_x')
+            elif 'layer2' in new_k: 
+                new_k = new_k.replace('layer2', 'conv3_x')
+            elif 'layer3' in new_k: 
+                new_k = new_k.replace('layer3', 'conv4_x')
+            elif 'layer4' in new_k: 
+                new_k = new_k.replace('layer4', 'conv5_x')
 
-    #     new_state_dict = {}
-    #     for k, v in checkpoint.items():
-    #         new_key = k
-    #         # 1. 移除 'module.' (如果是 DDP 訓練的)
-    #         if new_key.startswith('module.'):
-    #             new_key = new_key[7:]
+            # 處理 BasicBlock 內部的映射
+            # resnet_dilation 的 BasicBlock 用的是 residual_function Sequential
+            # conv1 -> residual_function.0
+            # bn1   -> residual_function.1
+            # conv2 -> residual_function.3
+            # bn2   -> residual_function.4
+            # downsample -> shortcut
             
-    #         # 2. 執行翻譯
-    #         for old_prefix, new_prefix in name_mapping.items():
-    #             if new_key.startswith(old_prefix):
-    #                 new_key = new_key.replace(old_prefix, new_prefix, 1)
-    #                 break # 找到對應前綴就停止
+            parts = new_k.split('.')
+            # parts 範例: ['conv2_x', '0', 'conv1', 'weight']
             
-    #         # 3. 過濾掉不需要的層 (例如 proj. 投影層)
-    #         # One-DM 的 ResNet 沒有 'proj' 或 'fc'
-    #         if new_key.startswith('proj.') or new_key.startswith('fc.'):
-    #             continue
+            if len(parts) >= 3 and parts[0].startswith('conv'):
+                block_idx = parts[1] # '0'
+                layer_name = parts[2] # 'conv1'
                 
-    #         new_state_dict[new_key] = v
+                prefix = f"{parts[0]}.{block_idx}"
+                suffix = ".".join(parts[3:]) if len(parts) > 3 else ""
+                
+                if layer_name == 'conv1':
+                    new_k = f"{prefix}.residual_function.0.{suffix}" if suffix else f"{prefix}.residual_function.0"
+                elif layer_name == 'bn1':
+                    new_k = f"{prefix}.residual_function.1.{suffix}" if suffix else f"{prefix}.residual_function.1"
+                elif layer_name == 'conv2':
+                    new_k = f"{prefix}.residual_function.3.{suffix}" if suffix else f"{prefix}.residual_function.3"
+                elif layer_name == 'bn2':
+                    new_k = f"{prefix}.residual_function.4.{suffix}" if suffix else f"{prefix}.residual_function.4"
+                elif layer_name == 'downsample':
+                    # downsample.0 -> shortcut.0
+                    new_k = new_k.replace('downsample', 'shortcut')
 
-    #     checkpoint = new_state_dict
+            # 第一層
+            if 'conv1.weight' in new_k: new_k = 'conv1.0.weight'
+            if 'bn1.' in new_k: new_k = new_k.replace('bn1.', 'conv1.1.')
 
-    #     # 再次檢查 key 是否正確
-    #     if 'conv1.weight' not in checkpoint:
-    #         print(f"⚠️ Warning: Mapping failed? Keys found: {list(checkpoint.keys())[:5]}")
-    #     else:
-    #         print(f"✅ Successfully mapped keys (e.g., backbone.0 -> conv1)")
+            new_state_dict[new_k] = v
 
-    #     # 載入模型
-    #     # strict=False 會自動忽略 layer4 (如果 One-DM 不需要) 以及 proj 層
-    #     miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
-    #     print(f"Loaded Feat_Encoder. Missing keys: {len(miss)}, Unexpected keys: {len(unexp)}")
+        # 處理第一層 Conv (RGB -> Grayscale)
+        if 'conv1.0.weight' in new_state_dict:
+            w = new_state_dict['conv1.0.weight']
+            if w.shape[1] == 3:
+                print("   -> Converting weights from RGB (3ch) to Grayscale (1ch)")
+                new_state_dict['conv1.0.weight'] = w.mean(dim=1, keepdim=True)
+
+        miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(new_state_dict, strict=False)
         
-    #     miss_f, unexp_f = unet.mix_net.freq_encoder.load_state_dict(checkpoint, strict=False)
-    #     print(f"Loaded freq_encoder. Missing keys: {len(miss_f)}, Unexpected keys: {len(unexp_f)}")
+        # 顯示真正重要的缺失層 (忽略 fc, avgpool)
+        real_miss = [k for k in miss if 'residual_function' in k or 'conv1' in k]
+        if len(real_miss) > 0:
+            print(f"⚠️ Warning: Still missing layers: {real_miss[:5]}")
+        else:
+            print(f"✅ Successfully loaded fine-tuned weights into Feat_Encoder!")
 
     optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
 
@@ -158,7 +174,8 @@ def main(opt):
             unet.load_state_dict(resume_data)
             print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
 
-    unet = DDP(unet, device_ids=[local_rank])
+    unet = DDP(unet, device_ids=[local_rank],find_unused_parameters=True)
+
     """build criterion and optimizer"""
     criterion = dict(nce=SupConLoss(contrast_mode='all'), recon=nn.MSELoss())
     diffusion = Diffusion(device=device, noise_offset=opt.noise_offset)
@@ -182,7 +199,7 @@ if __name__ == '__main__':
                         help='Config file for training (and optionally testing)')
     parser.add_argument('--feat_model', dest='feat_model', default='', help='pre-trained resnet18 model')
     parser.add_argument('--one_dm', dest='one_dm', default='', help='pre-trained one_dm model')
-    parser.add_argument('--log', default='debug',
+    parser.add_argument('--log_name', default='debug',
                         dest='log_name', required=False, help='the filename of log')
     parser.add_argument('--noise_offset', default=0, type=float, help='control the strength of noise')
     parser.add_argument('--device', type=str, default='cuda', help='device for training')

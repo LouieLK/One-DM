@@ -182,7 +182,7 @@ if __name__ == '__main__':
                         help='Config file for training (and optionally testing)')
     parser.add_argument('--feat_model', dest='feat_model', default='', help='pre-trained resnet18 model')
     parser.add_argument('--one_dm', dest='one_dm', default='', help='pre-trained one_dm model')
-    parser.add_argument('--log', default='debug',
+    parser.add_argument('--log_name', default='debug',
                         dest='log_name', required=False, help='the filename of log')
     parser.add_argument('--noise_offset', default=0, type=float, help='control the strength of noise')
     parser.add_argument('--device', type=str, default='cuda', help='device for training')
