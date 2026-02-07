@@ -42,11 +42,11 @@ class Trainer:
 
         is_unconditional = False # 標記旗標
 
-        if random.random() < 0.1:
-            # 將 Style 與 Laplace 設為全零 (模擬 Unconditional)
-            style_ref = torch.zeros_like(style_ref)
-            laplace_ref = torch.zeros_like(laplace_ref)
-            is_unconditional = True # 標記為無條件
+        # if random.random() < 0.1:
+        #     # 將 Style 與 Laplace 設為全零 (模擬 Unconditional)
+        #     style_ref = torch.zeros_like(style_ref)
+        #     laplace_ref = torch.zeros_like(laplace_ref)
+        #     is_unconditional = True # 標記為無條件
 
         # vae encode
         images = self.vae.encode(images).latent_dist.sample()

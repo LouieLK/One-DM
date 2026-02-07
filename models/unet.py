@@ -778,14 +778,8 @@ class UNetModel(nn.Module):
             nn.Linear(time_embed_dim, time_embed_dim),
         )
         if backbone_type == 'mamba':
-            from models.mamba_style import MambaStyleEncoder
-            self.mix_net = MambaStyleEncoder(
-                img_size=64,            # 確認您的資料集圖片大小是 64x64
-                in_chans=in_channels,             # Style(1) + Laplace(1)
-                embed_dim=context_dim,  # [修改] 直接使用 UNet 接收到的參數 (對應 YAML EMB_DIM)
-                depth=16,               # 層數建議維持 12~16，太深訓練會很久
-                out_dim=context_dim     # [修改] 輸出必須跟 context_dim 一樣，UNet 才吃得下去
-            )
+            from models.mamba_fusion import MambaStyleFusion
+            self.mix_net = MambaStyleFusion(d_model=context_dim,num_decoder_layers=6)
             print(f"🐍 Using Vision Mamba (Vim) Backbone! Dim={context_dim}")
         else:
             self.mix_net = Mix_TR(d_model=context_dim)
