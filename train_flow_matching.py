@@ -70,7 +70,9 @@ def main(opt):
         pin_memory=True
     )
 
-    vf_net = VectorFieldNetwork(in_dim=1024, hidden_dim=1024, num_layers=8).to(device)
+    # 找到定義 vf_net 的地方，改為讀取 features 的維度
+    input_dim = features.shape[1] 
+    vf_net = VectorFieldNetwork(in_dim=input_dim, hidden_dim=input_dim, num_layers=8).to(device)
     optimizer = optim.AdamW(vf_net.parameters(), lr=opt.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs)
 

@@ -41,18 +41,14 @@ class Mix_TR(nn.Module):
         # 注意: 這裡的 512 可能是硬編碼，建議確認是否需改為 d_model
         # 如果您的 d_model 是 256 但 ResNet 輸出是 512，這裡不用動
         self.high_pro_mlp = nn.Sequential(
-            nn.Linear(512, 4096), nn.GELU(), nn.Linear(4096, 256))
+            nn.Linear(self.d_model, 4096), nn.GELU(), nn.Linear(4096, 256))
         self.low_pro_mlp = nn.Sequential(
-            nn.Linear(512, 4096), nn.GELU(), nn.Linear(4096, 256))
-        self.low_feature_filter = nn.Sequential(nn.Linear(512, 1), nn.Sigmoid())
+            nn.Linear(self.d_model, 4096), nn.GELU(), nn.Linear(4096, 256))
+        self.low_feature_filter = nn.Sequential(nn.Linear(self.d_model, 1), nn.Sigmoid())
 
-        # === [新增] Learnable Null Embeddings for CFG ===
-        # 形狀設為 (16, 1, d_model)，對應 ResNet 輸出的序列長度 (4x4=16)
-        self.null_low_feature = nn.Parameter(torch.randn(16, 1, d_model))
-        self.null_high_feature = nn.Parameter(torch.randn(16, 1, d_model))
-
-        #[補上這行] 因為 content 特徵經過 add_position1D 後的形狀是 (t, B, d_model)
-        # 所以我們定義 (1, 1, d_model)，後續可以透過 .expand() 動態適應 batch_size
+        # [修改] 為了支援任意解析度，Null Feature 統一改為長度 1，後續再動態擴展
+        self.null_low_feature = nn.Parameter(torch.randn(1, 1, d_model))
+        self.null_high_feature = nn.Parameter(torch.randn(1, 1, d_model))
         self.null_content_feature = nn.Parameter(torch.randn(1, 1, d_model))
 
         self._reset_parameters()
@@ -60,10 +56,14 @@ class Mix_TR(nn.Module):
         ### low frequency style encoder
         self.Feat_Encoder = self.initialize_resnet18()
         self.style_dilation_layer = resnet18_dilation().conv5_x
-        
+        # 🌟 [新增] 將 ResNet 輸出的 512 維投影到您設定的 EMB_DIM
+        self.style_proj = nn.Conv2d(512, self.d_model, kernel_size=1)
+
         ### hig frequency style encoder
         self.freq_encoder = self.initialize_resnet18()
         self.freq_dilation_layer = resnet18_dilation().conv5_x
+        # 🌟 [新增] 將 ResNet 輸出的 512 維投影到您設定的 EMB_DIM
+        self.freq_proj = nn.Conv2d(512, self.d_model, kernel_size=1)
 
         ### content encoder
         # self.content_encoder = nn.Sequential(*([nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)] +list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]))
@@ -89,21 +89,28 @@ class Mix_TR(nn.Module):
         resnet.avgpool = nn.Identity()
         return resnet
 
-    def process_style_feature(self, encoder, dilation_layer, style, add_position2D, style_encoder):
+    # [修改] 函數簽名增加 proj_layer
+    def process_style_feature(self, encoder, dilation_layer, proj_layer, style, add_position2D, style_encoder):
         style = encoder(style)
-        style = rearrange(style, 'n (c h w) ->n c h w', c=256, h=4).contiguous()
+        
+        # 🌟 [動態計算] 自動計算特徵圖的長寬，相容 64x64 (h=4) 與 128x128 (h=8)
+        spatial_dim = int(math.sqrt(style.shape[1] // 256))
+        style = rearrange(style, 'n (c h w) ->n c h w', c=256, h=spatial_dim).contiguous()
+        
         style = dilation_layer(style)
+        style = proj_layer(style) # 🌟 [新增] 512 維降至 EMB_DIM
+        
         style = add_position2D(style)
         style = rearrange(style, 'n c h w ->(h w) n c').contiguous()
         style = style_encoder(style)
         return style
 
-    
+
     def get_low_style_feature(self, style):
-        return self.process_style_feature(self.Feat_Encoder, self.style_dilation_layer, style, self.add_position2D, self.style_encoder)
+        return self.process_style_feature(self.Feat_Encoder, self.style_dilation_layer, self.style_proj, style, self.add_position2D, self.style_encoder)
 
     def get_high_style_feature(self, laplace):
-        return self.process_style_feature(self.freq_encoder, self.freq_dilation_layer, laplace, self.add_position2D, self.fre_encoder)
+        return self.process_style_feature(self.freq_encoder, self.freq_dilation_layer, self.freq_proj, laplace, self.add_position2D, self.fre_encoder)
 
     def get_style_vectors(self, style, laplace):
         if style.shape[1] == 1:
@@ -135,8 +142,12 @@ class Mix_TR(nn.Module):
             # === CFG Unconditional Path ===
             # 使用 Learnable Null Embedding 擴展到 batch size
             # shape: (16, B, d_model)
-            anchor_high_feature = self.null_high_feature.expand(-1, batch_size, -1)
-            anchor_low_feature = self.null_low_feature.expand(-1, batch_size, -1)
+            # 🌟 [動態計算序列長度]
+            is_vector_input = (style.dim() == 2) if hasattr(style, 'dim') else False
+            seq_len = 1 if is_vector_input else (style.shape[2] // 16) * (style.shape[3] // 16)
+            
+            anchor_high_feature = self.null_high_feature.expand(seq_len, batch_size, -1)
+            anchor_low_feature = self.null_low_feature.expand(seq_len, batch_size, -1)
             
             # 對於 NCE Loss 的 embedding，無條件時 Loss 不計算，給 dummy 即可
             dummy_nce = torch.zeros(batch_size, 256, device=style.device) # 假設 MLP 輸出 256
@@ -211,8 +222,12 @@ class Mix_TR(nn.Module):
         if is_style_uncond:
              # === CFG Unconditional Path ===
              # 擴展 Null Embedding
-             anchor_low_feature = self.null_low_feature.expand(-1, batch_size, -1)
-             anchor_high_feature = self.null_high_feature.expand(-1, batch_size, -1)
+             # 🌟 [動態計算序列長度]
+            is_vector_input = (style.dim() == 2) if hasattr(style, 'dim') else False
+            seq_len = 1 if is_vector_input else (style.shape[2] // 16) * (style.shape[3] // 16)
+            
+            anchor_high_feature = self.null_high_feature.expand(seq_len, batch_size, -1)
+            anchor_low_feature = self.null_low_feature.expand(seq_len, batch_size, -1)
              
         elif is_vector_input:
             # === Mode 2: Vector Input (from Flow) ===

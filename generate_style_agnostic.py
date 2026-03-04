@@ -84,10 +84,11 @@ def main(args):
     flow_model = None
     if args.flow_type and args.flow_ckpt:
         print(f"Loading Flow Model ({args.flow_type}) from: {args.flow_ckpt}")
-        if args.flow_type == 'fm': # Flow Matching
-            flow_model = VectorFieldNetwork(in_dim=1024, hidden_dim=1024, num_layers=8).to(device)
-        elif args.flow_type == 'joint': # Joint Flow
-            flow_model = NormalizingFlow(num_inputs=1024, num_hidden=2048, num_layers=16).to(device)
+        flow_dim = cfg.MODEL.EMB_DIM * 2  # 🌟 [新增]
+        if args.flow_type == 'fm':
+            flow_model = VectorFieldNetwork(in_dim=flow_dim, hidden_dim=flow_dim, num_layers=8).to(device)
+        elif args.flow_type == 'joint':
+            flow_model = NormalizingFlow(num_inputs=flow_dim, num_hidden=flow_dim*2, num_layers=16).to(device)
         else:
             raise ValueError(f"Unknown flow_type: {args.flow_type}")
         
@@ -176,20 +177,18 @@ def main(args):
         with torch.no_grad():
             # === [新增] 準備 Style Features ===
             if flow_model is not None:
-                # 模式 2: 使用 Flow 生成特徵向量
-                z = torch.randn(B, 1024).to(device)
+                # 🌟 [修改] 1024 替換為 flow_dim
+                flow_dim = cfg.MODEL.EMB_DIM * 2
+                z = torch.randn(B, flow_dim).to(device)
                 
                 if args.flow_type == 'fm':
                     generated_features = sample_flow_matching(flow_model, z)
                 elif args.flow_type == 'joint':
                     generated_features = flow_model.reverse(z)
                 
-                # 假設前 512 維是 low_vec，後 512 維是 high_vec
-                # (這取決於您在 flow_extract_features.py 中 torch.cat 的順序)
-                # 您先前的代碼是: features = torch.cat([low_vec, high_vec], dim=1)
-                style_batch = generated_features[:, :512]   # 對應 anchor_low_feature
-                laplace_batch = generated_features[:, 512:] # 對應 anchor_high_feature
-                
+                # 🌟 [修改] 512 替換為 EMB_DIM 動態切片
+                style_batch = generated_features[:, :cfg.MODEL.EMB_DIM]   
+                laplace_batch = generated_features[:, cfg.MODEL.EMB_DIM:]
             else:
                 # 模式 1: 使用真實參考圖像 (與原本邏輯相同)
                 style_list = []

@@ -80,11 +80,12 @@ def main(args):
     logger.info(f"🚀 開始提取特徵並動態寫入 HDF5... (不再佔用龐大記憶體)")
 
     pbar = tqdm(loader, total=len(loader), desc="Extracting")
-    
+    # 在迴圈外先定義特徵維度
+    flow_dim = cfg.MODEL.EMB_DIM * 2
     # 開啟 h5 檔案進行寫入
     with h5py.File(save_path, 'w') as f:
-        # 建立可動態擴展 (maxshape=None) 的 HDF5 資料集
-        dataset_h5 = f.create_dataset('features', shape=(0, 1024), maxshape=(None, 1024), dtype='float32', chunks=(2048, 1024))
+        # [修改] 1024 替換為 flow_dim
+        dataset_h5 = f.create_dataset('features', shape=(0, flow_dim), maxshape=(None, flow_dim), dtype='float32', chunks=(2048, flow_dim))
         
         with torch.no_grad():
             for step, data in enumerate(pbar):

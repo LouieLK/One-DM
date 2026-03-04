@@ -153,10 +153,11 @@ def main(args):
     flow_model = None
     if args.flow_type and args.flow_ckpt:
         print(f"Loading Flow Model ({args.flow_type}) from: {args.flow_ckpt}")
+        flow_dim = cfg.MODEL.EMB_DIM * 2  # 🌟 [新增]
         if args.flow_type == 'fm':
-            flow_model = VectorFieldNetwork(in_dim=1024, hidden_dim=1024, num_layers=8).to(device)
+            flow_model = VectorFieldNetwork(in_dim=flow_dim, hidden_dim=flow_dim, num_layers=8).to(device)
         elif args.flow_type == 'joint':
-            flow_model = NormalizingFlow(num_inputs=1024, num_hidden=2048, num_layers=16).to(device)
+            flow_model = NormalizingFlow(num_inputs=flow_dim, num_hidden=flow_dim*2, num_layers=16).to(device)
         else:
             raise ValueError(f"Unknown flow_type: {args.flow_type}")
         
@@ -260,7 +261,9 @@ def main(args):
                         
                         if flow_model is not None:
                             if str_wid not in flow_style_cache:
-                                z = torch.randn(1, 1024).to(device)
+                                # 🌟 [修改] 1024 替換為 flow_dim
+                                flow_dim = cfg.MODEL.EMB_DIM * 2
+                                z = torch.randn(1, flow_dim).to(device)
                                 if args.flow_type == 'fm':
                                     feat = sample_flow_matching(flow_model, z)
                                 elif args.flow_type == 'joint':
@@ -268,9 +271,8 @@ def main(args):
                                 flow_style_cache[str_wid] = feat
                             
                             cached_feat = flow_style_cache[str_wid]
-                            style_list.append(cached_feat[0, :512])
-                            laplace_list.append(cached_feat[0, 512:])
-
+                            style_list.append(cached_feat[0, :cfg.MODEL.EMB_DIM])
+                            laplace_list.append(cached_feat[0, cfg.MODEL.EMB_DIM:])
                         content_ref_list.append(c_ref)
                         valid_batch_indices.append(i)
                     except Exception:

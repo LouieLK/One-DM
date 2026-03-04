@@ -69,9 +69,10 @@ def main(opt):
         pin_memory=True
     )
 
-    input_dim = 1024 
     logger.info(f"Building Joint Normalizing Flow (Dim: {input_dim})...")
     
+    # 找到定義 flow_model 的地方
+    input_dim = features.shape[1] 
     flow_model = NormalizingFlow(num_inputs=input_dim, num_hidden=input_dim*2, num_layers=16).to(device)
     
     optimizer = optim.Adam(flow_model.parameters(), lr=opt.lr, weight_decay=1e-5)
