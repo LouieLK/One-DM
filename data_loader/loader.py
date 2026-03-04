@@ -17,7 +17,7 @@ class HandwritingDataset(Dataset):
         """設定全域 Config，所有實例化物件皆可共用"""
         cls._global_cfg = cfg
 
-    def __init__(self, cfg=None, split='train', content_type='unifont'):
+    def __init__(self, cfg=None, split='train', content_type='kaifont'):
         # 1. Config 解析
         if cfg is not None:
             self.cfg = cfg
@@ -156,7 +156,8 @@ class HandwritingDataset(Dataset):
             max_s_width = self.style_len
 
         imgs = torch.ones([len(batch), batch[0]['img'].shape[0], batch[0]['img'].shape[1], max(width)], dtype=torch.float32)
-        content_ref = torch.zeros([len(batch), max(c_width), 16 , 16], dtype=torch.float32)
+        c_h, c_w = self.con_symbols.shape[-2], self.con_symbols.shape[-1]
+        content_ref = torch.zeros([len(batch), max(c_width), c_h , c_w], dtype=torch.float32)
         
         style_ref = torch.ones([len(batch), batch[0]['style'].shape[0], batch[0]['style'].shape[1], max_s_width], dtype=torch.float32)
         laplace_ref = torch.zeros([len(batch), batch[0]['laplace'].shape[0], batch[0]['laplace'].shape[1], max_s_width], dtype=torch.float32)
@@ -263,7 +264,7 @@ class Random_StyleDataset(HandwritingDataset):
         return {'style':style_ref, 'laplace':laplace_ref,'wid':wid_list}
 
 class ContentData(HandwritingDataset):
-    def __init__(self,split='train', content_type='unifont', cfg=None) -> None:
+    def __init__(self,split='train', content_type='kaifont', cfg=None) -> None:
         super().__init__(cfg=cfg, split=split, content_type=content_type)
        
     def get_content(self, label):

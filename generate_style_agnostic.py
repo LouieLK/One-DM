@@ -106,7 +106,7 @@ def main(args):
         style_dataset = HandwritingDataset(split='test')
         available_indices = style_dataset.indices
     
-    content_loader = ContentData(split='train', content_type='unifont', cfg=cfg)
+    content_loader = ContentData(split='train', content_type='kaifont', cfg=cfg)
 
     # 4. 規劃 Content 平衡任務
     print("📋 Planning balanced tasks...")

@@ -66,7 +66,15 @@ class Mix_TR(nn.Module):
         self.freq_dilation_layer = resnet18_dilation().conv5_x
 
         ### content encoder
-        self.content_encoder = nn.Sequential(*([nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)] +list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]))
+        # self.content_encoder = nn.Sequential(*([nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)] +list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]))
+        self.content_encoder = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            *list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2],
+            # [新增] 無論輸入的字型圖片多大，都強制提取全局結構特徵為 1x1
+            nn.AdaptiveAvgPool2d((1, 1)), 
+            # [新增] 完美將 ResNet 的 256 通道映射到您在 YAML 設定的 EMB_DIM (d_model)
+            nn.Conv2d(256, self.d_model, kernel_size=1) 
+        )
 
     def _reset_parameters(self):
         for p in self.parameters():

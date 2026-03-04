@@ -107,7 +107,7 @@ class Trainer:
         drop_style = random.random() < 0.1     # 10% 機率丟棄風格
         drop_content = random.random() < 0.1   # 10% 機率丟棄內容
         is_style_uncond = False # 標記旗標
-
+        is_content_uncond = False  # [新增] 
         if drop_style:
             style_ref = torch.zeros_like(style_ref)
             laplace_ref = torch.zeros_like(laplace_ref)
@@ -115,7 +115,7 @@ class Trainer:
 
         if drop_content:
             content_ref = torch.zeros_like(content_ref)
-
+            is_content_uncond = True   # [新增]
         # vae encode
         with torch.no_grad(): # [建議] Encode 過程通常不需要梯度
             latent_images = self.vae.encode(images).latent_dist.sample()
@@ -143,10 +143,14 @@ class Trainer:
             high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
             low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
 
-        rec_out = self.ocr_model(x_start)
-        input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
-        target_shifted = target + 1 
-        ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target_shifted, input_lengths, target_lengths)
+        # [修改] 如果沒有 Content，就絕對不能算 CTC Loss！
+        if is_content_uncond:
+            ctc_loss = torch.tensor(0.0, device=self.device)
+        else:
+            rec_out = self.ocr_model(x_start)
+            input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
+            target_shifted = target + 1 
+            ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target_shifted, input_lengths, target_lengths)
 
         # 總 Loss
         loss = recon_loss + high_nce_loss + low_nce_loss + 0.1 * ctc_loss

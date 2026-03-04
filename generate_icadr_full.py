@@ -168,7 +168,7 @@ def main(args):
     # 2. 準備資料集
     HandwritingDataset.set_global_config(cfg)
     test_dataset = HandwritingDataset(split=args.split) # 這裡可以是 train 或 test
-    content_loader = ContentData(split='train', content_type='unifont', cfg=cfg)
+    content_loader = ContentData(split='train', content_type='kaifont', cfg=cfg)
     
     total_images = len(test_dataset)
     print(f"✅ Dataset Loaded. Split: {args.split}, Total images: {total_images}")
