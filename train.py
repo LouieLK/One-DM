@@ -66,7 +66,9 @@ def main(opt):
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
                      attention_resolutions=cfg.MODEL.ATTENTION_RESOLUTIONS, channel_mult=cfg.MODEL.CHANNEL_MULT, num_heads=cfg.MODEL.NUM_HEADS, 
-                     context_dim=cfg.MODEL.EMB_DIM).to(device)
+                     context_dim=cfg.MODEL.EMB_DIM,
+                     use_checkpoint=True   # 🌟 [關鍵新增] 開啟梯度檢查點！
+                     ).to(device)
 
     # ----- Pretrained 模型載入 -----
     if len(opt.one_dm) > 0:

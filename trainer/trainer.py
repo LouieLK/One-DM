@@ -11,7 +11,7 @@ from data_loader.loader import ContentData
 import torch.distributed as dist
 import torch.nn.functional as F
 import random
-
+from torch.amp import autocast, GradScaler
 class Trainer:
     def __init__(self, diffusion, unet, vae, criterion, optimizer, data_loader, 
                 logs, valid_data_loader=None, device=None, ocr_model=None, ctc_loss=None):
@@ -29,6 +29,7 @@ class Trainer:
         self.ocr_model = ocr_model
         self.ctc_criterion = ctc_loss
         self.device = device
+        self.scaler = GradScaler('cuda')
       
     def _train_iter(self, data, step, pbar):
         self.model.train()
@@ -62,20 +63,20 @@ class Trainer:
         t = self.diffusion.sample_timesteps(images.shape[0]).to(self.device)
         x_t, noise = self.diffusion.noise_images(images, t)
         
-       
-        predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
-        # calculate loss
-        recon_loss = self.recon_criterion(predicted_noise, noise)
-        
-        if is_style_uncond:
-            high_nce_loss = torch.tensor(0.0, device=self.device)
-            low_nce_loss = torch.tensor(0.0, device=self.device)
-        else:
-            # 只有在有風格輸入時，才計算風格損失
-            high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
-            low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
-        
-        loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
+        with autocast(device_type='cuda', dtype=torch.float16):
+            predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
+            # calculate loss
+            recon_loss = self.recon_criterion(predicted_noise, noise)
+            
+            if is_style_uncond:
+                high_nce_loss = torch.tensor(0.0, device=self.device)
+                low_nce_loss = torch.tensor(0.0, device=self.device)
+            else:
+                # 只有在有風格輸入時，才計算風格損失
+                high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
+                low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
+            
+            loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
         # backward and update trainable parameters
         self.optimizer.zero_grad()
         loss.backward()
@@ -126,34 +127,35 @@ class Trainer:
         t = self.diffusion.sample_timesteps(latent_images.shape[0], finetune=True).to(self.device)
         x_t, noise = self.diffusion.noise_images(latent_images, t)
         
-        # 取得預測結果
-        # train_ddim 內部應該已經有計算 x_start 的邏輯
-        x_start, predicted_noise, high_nce_emb, low_nce_emb = self.diffusion.train_ddim(
-            self.model, x_t, style_ref, laplace_ref, content_ref, t, sampling_timesteps=5
-        )
-        
-        # calculate loss
-        recon_loss = self.recon_criterion(predicted_noise, noise)
+        with autocast(device_type='cuda', dtype=torch.float16):
+            # 取得預測結果
+            # train_ddim 內部應該已經有計算 x_start 的邏輯
+            x_start, predicted_noise, high_nce_emb, low_nce_emb = self.diffusion.train_ddim(
+                self.model, x_t, style_ref, laplace_ref, content_ref, t, sampling_timesteps=5
+            )
+            
+            # calculate loss
+            recon_loss = self.recon_criterion(predicted_noise, noise)
 
-        if is_style_uncond:
-            high_nce_loss = torch.tensor(0.0, device=self.device)
-            low_nce_loss = torch.tensor(0.0, device=self.device)
-        else:
-            # 只有在有風格輸入時，才計算風格損失
-            high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
-            low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
+            if is_style_uncond:
+                high_nce_loss = torch.tensor(0.0, device=self.device)
+                low_nce_loss = torch.tensor(0.0, device=self.device)
+            else:
+                # 只有在有風格輸入時，才計算風格損失
+                high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
+                low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
 
-        # [修改] 如果沒有 Content，就絕對不能算 CTC Loss！
-        if is_content_uncond:
-            ctc_loss = torch.tensor(0.0, device=self.device)
-        else:
-            rec_out = self.ocr_model(x_start)
-            input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
-            target_shifted = target + 1 
-            ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target_shifted, input_lengths, target_lengths)
+            # [修改] 如果沒有 Content，就絕對不能算 CTC Loss！
+            if is_content_uncond:
+                ctc_loss = torch.tensor(0.0, device=self.device)
+            else:
+                rec_out = self.ocr_model(x_start)
+                input_lengths = torch.IntTensor(x_start.shape[0]*[rec_out.shape[0]])
+                target_shifted = target + 1 
+                ctc_loss = self.ctc_criterion(F.log_softmax(rec_out, dim=2), target_shifted, input_lengths, target_lengths)
 
-        # 總 Loss
-        loss = recon_loss + high_nce_loss + low_nce_loss + 0.1 * ctc_loss
+            # 總 Loss
+            loss = recon_loss + high_nce_loss + low_nce_loss + 0.1 * ctc_loss
 
         # backward
         self.optimizer.zero_grad()
