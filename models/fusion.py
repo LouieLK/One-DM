@@ -51,6 +51,10 @@ class Mix_TR(nn.Module):
         self.null_low_feature = nn.Parameter(torch.randn(16, 1, d_model))
         self.null_high_feature = nn.Parameter(torch.randn(16, 1, d_model))
 
+        #[補上這行] 因為 content 特徵經過 add_position1D 後的形狀是 (t, B, d_model)
+        # 所以我們定義 (1, 1, d_model)，後續可以透過 .expand() 動態適應 batch_size
+        self.null_content_feature = nn.Parameter(torch.randn(1, 1, d_model))
+
         self._reset_parameters()
 
         ### low frequency style encoder
@@ -116,10 +120,10 @@ class Mix_TR(nn.Module):
     def forward(self, style, laplace, content):
         # 檢查是否為 Unconditional (Trainer 傳入全零圖片)
         # 判斷標準：style 的絕對值總和是否接近 0
-        is_unconditional = (torch.sum(torch.abs(style)) < 1e-6)
+        is_style_uncond = (torch.sum(torch.abs(style)) < 1e-6)
         batch_size = style.shape[0]
 
-        if is_unconditional:
+        if is_style_uncond:
             # === CFG Unconditional Path ===
             # 使用 Learnable Null Embedding 擴展到 batch size
             # shape: (16, B, d_model)
@@ -169,14 +173,23 @@ class Mix_TR(nn.Module):
             low_nce_emb = torch.stack([anchor_low_nce, pos_low_nce], dim=1) # B 2 C
             low_nce_emb = nn.functional.normalize(low_nce_emb, p=2, dim=2)
 
-        # content encoder
-        content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
-        content = self.content_encoder(content)
-        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous() # n is batch size
-        #content = content.permute(1, 0, 2).contiguous() # t n c
-        content = self.add_position1D(content)
+        # =========== [修改後] 加入 Unconditional 判斷 ===========
+        is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
         
-        style_hs = self.decoder(content, anchor_low_feature, tgt_mask=None)
+        if is_content_uncond:
+            # CFG Content Unconditional Path
+            # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
+            content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
+        else:
+            # 正常處理路徑
+            content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
+            content = self.content_encoder(content)
+            content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
+            content_feat = self.add_position1D(content)
+        
+        # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+        style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
         return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
@@ -184,10 +197,10 @@ class Mix_TR(nn.Module):
     def generate(self, style, laplace, content):
         is_vector_input = (style.dim() == 2)
         # 檢查是否為 Unconditional (Inference 時傳入全零)
-        is_unconditional = (torch.sum(torch.abs(style)) < 1e-6)
+        is_style_uncond = (torch.sum(torch.abs(style)) < 1e-6)
         batch_size = style.shape[0]
 
-        if is_unconditional:
+        if is_style_uncond:
              # === CFG Unconditional Path ===
              # 擴展 Null Embedding
              anchor_low_feature = self.null_low_feature.expand(-1, batch_size, -1)
@@ -216,14 +229,23 @@ class Mix_TR(nn.Module):
             anchor_mask = self.low_feature_filter(anchor_low_feature)
             anchor_low_feature = anchor_low_feature * anchor_mask
 
-        # content encoder (保持不變)
-        content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
-        content = self.content_encoder(content)
-        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous() # n is batch size
-        content = self.add_position1D(content)
+        # =========== [修改後] 加入 Unconditional 判斷 ===========
+        is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
         
-        # fusion of content and style features
-        style_hs = self.decoder(content, anchor_low_feature, tgt_mask=None)
+        if is_content_uncond:
+            # CFG Content Unconditional Path
+            # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
+            content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
+        else:
+            # 正常處理路徑
+            content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
+            content = self.content_encoder(content)
+            content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
+            content_feat = self.add_position1D(content)
+        
+        # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+        style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
         return hs[0].permute(1, 0, 2).contiguous()

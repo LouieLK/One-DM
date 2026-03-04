@@ -40,13 +40,18 @@ class Trainer:
             data['content'].to(self.device), \
             data['wid'].to(self.device)
 
-        is_unconditional = False # 標記旗標
+        # ===== [修改] Classifier-Free Guidance 雙重隨機 Dropout =====
+        drop_style = random.random() < 0.1     # 10% 機率丟棄風格
+        drop_content = random.random() < 0.1   # 10% 機率丟棄內容
+        is_style_uncond = False # 標記旗標
 
-        if random.random() < 0.1:
-            # 將 Style 與 Laplace 設為全零 (模擬 Unconditional)
+        if drop_style:
             style_ref = torch.zeros_like(style_ref)
             laplace_ref = torch.zeros_like(laplace_ref)
-            is_unconditional = True # 標記為無條件
+            is_style_uncond = True 
+
+        if drop_content:
+            content_ref = torch.zeros_like(content_ref)
 
         # vae encode
         images = self.vae.encode(images).latent_dist.sample()
@@ -62,9 +67,7 @@ class Trainer:
         # calculate loss
         recon_loss = self.recon_criterion(predicted_noise, noise)
         
-        if is_unconditional:
-            # 如果是無條件輸入，我們不應該懲罰風格特徵
-            # 因為輸入是空的，輸出的 embedding 也是無意義的，不能拿來對齊 Writer ID
+        if is_style_uncond:
             high_nce_loss = torch.tensor(0.0, device=self.device)
             low_nce_loss = torch.tensor(0.0, device=self.device)
         else:
@@ -100,13 +103,18 @@ class Trainer:
             data['target'].to(self.device), \
             data['target_lengths'].to(self.device)
         
-        # Classifier-Free Guidance Dropout
-        is_unconditional = False
-        if random.random() < 0.1:
-            # 將 Style 與 Laplace 設為全零 (模擬 Unconditional)
+        # ===== [修改] Classifier-Free Guidance 雙重隨機 Dropout =====
+        drop_style = random.random() < 0.1     # 10% 機率丟棄風格
+        drop_content = random.random() < 0.1   # 10% 機率丟棄內容
+        is_style_uncond = False # 標記旗標
+
+        if drop_style:
             style_ref = torch.zeros_like(style_ref)
             laplace_ref = torch.zeros_like(laplace_ref)
-            is_unconditional = True
+            is_style_uncond = True 
+
+        if drop_content:
+            content_ref = torch.zeros_like(content_ref)
 
         # vae encode
         with torch.no_grad(): # [建議] Encode 過程通常不需要梯度
@@ -127,10 +135,11 @@ class Trainer:
         # calculate loss
         recon_loss = self.recon_criterion(predicted_noise, noise)
 
-        if is_unconditional:
+        if is_style_uncond:
             high_nce_loss = torch.tensor(0.0, device=self.device)
             low_nce_loss = torch.tensor(0.0, device=self.device)
         else:
+            # 只有在有風格輸入時，才計算風格損失
             high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
             low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
 

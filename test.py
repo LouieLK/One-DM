@@ -60,7 +60,7 @@ def main(opt):
     """build model architecture"""
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
-                     attention_resolutions=(1,1), channel_mult=(1, 1), num_heads=cfg.MODEL.NUM_HEADS, 
+                     attention_resolutions=cfg.MODEL.ATTENTION_RESOLUTIONS, channel_mult=cfg.MODEL.CHANNEL_MULT, num_heads=cfg.MODEL.NUM_HEADS, 
                      context_dim=cfg.MODEL.EMB_DIM).to(opt.device)
     
     """load pretrained one_dm model"""

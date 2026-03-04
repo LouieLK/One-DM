@@ -65,7 +65,7 @@ def main(opt):
     # ----- 模型定義 -----
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
-                     attention_resolutions=(1,1), channel_mult=(1, 1), num_heads=cfg.MODEL.NUM_HEADS, 
+                     attention_resolutions=cfg.MODEL.ATTENTION_RESOLUTIONS, channel_mult=cfg.MODEL.CHANNEL_MULT, num_heads=cfg.MODEL.NUM_HEADS, 
                      context_dim=cfg.MODEL.EMB_DIM).to(device)
 
     # ----- Pretrained 模型載入 -----
@@ -80,68 +80,7 @@ def main(opt):
         miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
         assert len(unexp) <= 32, "Failed to load the pretrained model"
         print('Loaded pretrained resnet18 model from {}'.format(opt.feat_model))
-
-    # """load pretrained resnet18 model (Custom Mapping for backbone.x -> conv1/layer1...)"""
-    # if len(opt.feat_model) > 0:
-    #     print(f'Loading pretrained style encoder from {opt.feat_model} ...')
-    #     checkpoint = torch.load(opt.feat_model, map_location=torch.device('cpu'))
         
-    #     # 處理可能的 state_dict 包裝
-    #     if 'state_dict' in checkpoint:
-    #         checkpoint = checkpoint['state_dict']
-
-    #     # 定義翻譯字典：將 Sequential 的索引映射回 ResNet 的標準名稱
-    #     # 根據您的 inspect 結果：
-    #     # backbone.0 -> conv1
-    #     # backbone.1 -> bn1
-    #     # backbone.4 -> layer1
-    #     # backbone.5 -> layer2
-    #     # backbone.6 -> layer3
-    #     # backbone.7 -> layer4 (雖然 One-DM 不用 layer4，但載入也無妨)
-    #     name_mapping = {
-    #         'backbone.0.': 'conv1.',
-    #         'backbone.1.': 'bn1.',
-    #         'backbone.4.': 'layer1.',
-    #         'backbone.5.': 'layer2.',
-    #         'backbone.6.': 'layer3.',
-    #         'backbone.7.': 'layer4.'
-    #     }
-
-    #     new_state_dict = {}
-    #     for k, v in checkpoint.items():
-    #         new_key = k
-    #         # 1. 移除 'module.' (如果是 DDP 訓練的)
-    #         if new_key.startswith('module.'):
-    #             new_key = new_key[7:]
-            
-    #         # 2. 執行翻譯
-    #         for old_prefix, new_prefix in name_mapping.items():
-    #             if new_key.startswith(old_prefix):
-    #                 new_key = new_key.replace(old_prefix, new_prefix, 1)
-    #                 break # 找到對應前綴就停止
-            
-    #         # 3. 過濾掉不需要的層 (例如 proj. 投影層)
-    #         # One-DM 的 ResNet 沒有 'proj' 或 'fc'
-    #         if new_key.startswith('proj.') or new_key.startswith('fc.'):
-    #             continue
-                
-    #         new_state_dict[new_key] = v
-
-    #     checkpoint = new_state_dict
-
-    #     # 再次檢查 key 是否正確
-    #     if 'conv1.weight' not in checkpoint:
-    #         print(f"⚠️ Warning: Mapping failed? Keys found: {list(checkpoint.keys())[:5]}")
-    #     else:
-    #         print(f"✅ Successfully mapped keys (e.g., backbone.0 -> conv1)")
-
-    #     # 載入模型
-    #     # strict=False 會自動忽略 layer4 (如果 One-DM 不需要) 以及 proj 層
-    #     miss, unexp = unet.mix_net.Feat_Encoder.load_state_dict(checkpoint, strict=False)
-    #     print(f"Loaded Feat_Encoder. Missing keys: {len(miss)}, Unexpected keys: {len(unexp)}")
-        
-    #     miss_f, unexp_f = unet.mix_net.freq_encoder.load_state_dict(checkpoint, strict=False)
-    #     print(f"Loaded freq_encoder. Missing keys: {len(miss_f)}, Unexpected keys: {len(unexp_f)}")
 
     optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
 
