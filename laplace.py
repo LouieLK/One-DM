@@ -32,6 +32,6 @@ def batch_laplace(input_dir, output_dir):
                 cv2.imwrite(output_path, threshold)
 
 if __name__ == '__main__':
-    input_dir = '/One-DM/data/Traditional-Chinese-Handwriting-Dataset/data'
-    output_dir = '/One-DM/data/Traditional-Chinese-Handwriting-Dataset/data_laplace'
+    input_dir = '/workspace/One-DM/data_ch/ICADR-2013/data'
+    output_dir = '/workspace/One-DM/data_ch/ICADR-2013/data_laplace'
     batch_laplace(input_dir, output_dir)

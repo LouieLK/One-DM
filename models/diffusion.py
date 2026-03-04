@@ -107,7 +107,7 @@ class Diffusion:
         return x, noise_list[0], high_nce_emb, low_nce_emb
 
     @torch.no_grad()
-    def ddim_sample(self, model, vae, n, x, styles, laplace, content, sampling_timesteps=50, eta=0):
+    def ddim_sample(self, model, vae, n, x, styles, laplace, content, sampling_timesteps=50, eta=0, guidance_scale=1.0):
         model.eval()
 
         total_timesteps, sampling_timesteps = self.noise_steps, sampling_timesteps
@@ -119,8 +119,20 @@ class Diffusion:
         for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
             time = (torch.ones(n) * time).long().to(self.device)
             time_next = (torch.ones(n) * time_next).long().to(self.device)
-            predicted_noise = model(x, time, styles, laplace, content)
 
+            # 2. 模型預測 (CFG)
+            # 有條件
+            cond_noise = model(x, time, styles, laplace, content)
+
+            # 無條件與混合
+            if guidance_scale != 1.0:
+                uncond_styles = torch.zeros_like(styles)
+                uncond_laplace = torch.zeros_like(laplace)
+                uncond_noise = model(x, time, uncond_styles, uncond_laplace, content)
+                predicted_noise = uncond_noise + guidance_scale * (cond_noise - uncond_noise)
+            else:
+                predicted_noise = cond_noise
+                
             beta = self.beta[time][:, None, None, None]
             alpha_hat = self.alpha_hat[time][:, None, None, None]
             alpha_hat_next = self.alpha_hat[time_next][:, None, None, None]

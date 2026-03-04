@@ -727,6 +727,7 @@ class UNetModel(nn.Module):
         num_heads=-1,
         num_head_channels=-1,
         num_heads_upsample=-1,
+        num_encoder_layers = 3,
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
@@ -770,6 +771,7 @@ class UNetModel(nn.Module):
         self.num_head_channels = num_head_channels
         self.num_heads_upsample = num_heads_upsample
         self.predict_codebook_ids = n_embed is not None
+        self.num_encoder_layers = num_encoder_layers
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
@@ -788,7 +790,7 @@ class UNetModel(nn.Module):
             )
             print(f"🐍 Using Vision Mamba (Vim) Backbone! Dim={context_dim}")
         else:
-            self.mix_net = Mix_TR(d_model=context_dim)
+            self.mix_net = Mix_TR(d_model=context_dim,num_encoder_layers=self.num_encoder_layers)
             print("Using Standard ResNet18 Backbone")
 
         #==================== INPUT BLOCK ====================

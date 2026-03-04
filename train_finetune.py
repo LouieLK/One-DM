@@ -82,7 +82,7 @@ def main(opt):
     #     filter(lambda p: p.requires_grad, unet.parameters()), # 只更新沒被凍結的參數
     #     lr=cfg.SOLVER.BASE_LR
     # ) 
-    unet = DDP(unet, device_ids=[local_rank], broadcast_buffers=False)
+    unet = DDP(unet, device_ids=[local_rank], broadcast_buffers=False, find_unused_parameters=True)
     optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
     ctc_loss = nn.CTCLoss()
     criterion = dict(nce=SupConLoss(contrast_mode='all'), recon=nn.MSELoss())

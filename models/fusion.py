@@ -14,6 +14,7 @@ class Mix_TR(nn.Module):
                  normalize_before=True):
         super(Mix_TR, self).__init__()
         
+        self.d_model = d_model # 保存 d_model 以供使用
         
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
@@ -36,11 +37,19 @@ class Mix_TR(nn.Module):
         
         self.add_position1D = PositionalEncoding(dropout=0.1, dim=d_model) # add 1D position encoding
         self.add_position2D = PositionalEncoding2D(dropout=0.1, d_model=d_model) # add 2D position encoding
+        
+        # 注意: 這裡的 512 可能是硬編碼，建議確認是否需改為 d_model
+        # 如果您的 d_model 是 256 但 ResNet 輸出是 512，這裡不用動
         self.high_pro_mlp = nn.Sequential(
             nn.Linear(512, 4096), nn.GELU(), nn.Linear(4096, 256))
         self.low_pro_mlp = nn.Sequential(
             nn.Linear(512, 4096), nn.GELU(), nn.Linear(4096, 256))
         self.low_feature_filter = nn.Sequential(nn.Linear(512, 1), nn.Sigmoid())
+
+        # === [新增] Learnable Null Embeddings for CFG ===
+        # 形狀設為 (16, 1, d_model)，對應 ResNet 輸出的序列長度 (4x4=16)
+        self.null_low_feature = nn.Parameter(torch.randn(16, 1, d_model))
+        self.null_high_feature = nn.Parameter(torch.randn(16, 1, d_model))
 
         self._reset_parameters()
 
@@ -84,14 +93,7 @@ class Mix_TR(nn.Module):
     def get_high_style_feature(self, laplace):
         return self.process_style_feature(self.freq_encoder, self.freq_dilation_layer, laplace, self.add_position2D, self.fre_encoder)
 
-    # === [新增] Helper for Flow Training: 提取未壓縮的 512-dim 向量 ===
     def get_style_vectors(self, style, laplace):
-        """
-        提取用於訓練 Normalizing Flow 的特徵向量。
-        這裡回傳的是 Global Average Pooling 後的 512 維特徵 (Pre-MLP)，
-        確保維度與 d_model (512) 一致，供 Decoder 直接使用。
-        """
-        # 處理圖片輸入
         if style.shape[1] == 1:
             anchor_style = style
             anchor_high = laplace
@@ -99,61 +101,78 @@ class Mix_TR(nn.Module):
             anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
             anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
 
-        # 1. High Freq Feature
-        anchor_high_feature = self.get_high_style_feature(anchor_high) # Shape: [T, N, 512]
-        high_vec = torch.mean(anchor_high_feature, dim=0) # Shape: [N, 512]
+        anchor_high_feature = self.get_high_style_feature(anchor_high) 
+        high_vec = torch.mean(anchor_high_feature, dim=0) 
 
-        # 2. Low Freq Feature
         anchor_low = anchor_style
         anchor_low_feature = self.get_low_style_feature(anchor_low)
         anchor_mask = self.low_feature_filter(anchor_low_feature)
-        anchor_low_feature = anchor_low_feature * anchor_mask # Apply filter
-        low_vec = torch.mean(anchor_low_feature, dim=0) # Shape: [N, 512]
+        anchor_low_feature = anchor_low_feature * anchor_mask 
+        low_vec = torch.mean(anchor_low_feature, dim=0) 
         
         return low_vec, high_vec
 
     
     def forward(self, style, laplace, content):
-        # get the high frequency and style feature
-        anchor_style = style[:, 0, :, :].clone().unsqueeze(1).contiguous()
-        anchor_high = laplace[:, 0, :, :].clone().unsqueeze(1).contiguous()
-        anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
+        # 檢查是否為 Unconditional (Trainer 傳入全零圖片)
+        # 判斷標準：style 的絕對值總和是否接近 0
+        is_unconditional = (torch.sum(torch.abs(style)) < 1e-6)
+        batch_size = style.shape[0]
 
-        anchor_high_nce = self.high_pro_mlp(anchor_high_feature) # t n c
-        anchor_high_nce = torch.mean(anchor_high_nce, dim=0) # n c
+        if is_unconditional:
+            # === CFG Unconditional Path ===
+            # 使用 Learnable Null Embedding 擴展到 batch size
+            # shape: (16, B, d_model)
+            anchor_high_feature = self.null_high_feature.expand(-1, batch_size, -1)
+            anchor_low_feature = self.null_low_feature.expand(-1, batch_size, -1)
+            
+            # 對於 NCE Loss 的 embedding，無條件時 Loss 不計算，給 dummy 即可
+            dummy_nce = torch.zeros(batch_size, 256, device=style.device) # 假設 MLP 輸出 256
+            high_nce_emb = torch.stack([dummy_nce, dummy_nce], dim=1)
+            low_nce_emb = torch.stack([dummy_nce, dummy_nce], dim=1)
+            
+        else:
+            # === Normal Conditional Path ===
+            # get the high frequency and style feature
+            anchor_style = style[:, 0, :, :].clone().unsqueeze(1).contiguous()
+            anchor_high = laplace[:, 0, :, :].clone().unsqueeze(1).contiguous()
+            anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
 
-        pos_style = style[:, 1, :, :].clone().unsqueeze(1).contiguous()
-        pos_high = laplace[:, 1, :, :].clone().unsqueeze(1).contiguous()
-        pos_high_feature = self.get_high_style_feature(pos_high) # t n c
+            anchor_high_nce = self.high_pro_mlp(anchor_high_feature) # t n c
+            anchor_high_nce = torch.mean(anchor_high_nce, dim=0) # n c
 
-        pos_high_nce = self.high_pro_mlp(pos_high_feature) # t n c
-        pos_high_nce = torch.mean(pos_high_nce, dim=0) # n c
-  
-        high_nce_emb = torch.stack([anchor_high_nce, pos_high_nce], dim=1) # B 2 C
-        high_nce_emb = nn.functional.normalize(high_nce_emb, p=2, dim=2)
+            pos_style = style[:, 1, :, :].clone().unsqueeze(1).contiguous()
+            pos_high = laplace[:, 1, :, :].clone().unsqueeze(1).contiguous()
+            pos_high_feature = self.get_high_style_feature(pos_high) # t n c
 
-        # get the low frequency and style feature
-        anchor_low = anchor_style
-        anchor_low_feature = self.get_low_style_feature(anchor_low)
-        anchor_mask = self.low_feature_filter(anchor_low_feature)
-        anchor_low_feature = anchor_low_feature * anchor_mask
-        anchor_low_nce = self.low_pro_mlp(anchor_low_feature) # t n c
-        anchor_low_nce = torch.mean(anchor_low_nce, dim=0)
+            pos_high_nce = self.high_pro_mlp(pos_high_feature) # t n c
+            pos_high_nce = torch.mean(pos_high_nce, dim=0) # n c
+    
+            high_nce_emb = torch.stack([anchor_high_nce, pos_high_nce], dim=1) # B 2 C
+            high_nce_emb = nn.functional.normalize(high_nce_emb, p=2, dim=2)
 
-        pos_low = pos_style 
-        pos_low_feature = self.get_low_style_feature(pos_low)
-        pos_mask = self.low_feature_filter(pos_low_feature)
-        pos_low_feature = pos_low_feature * pos_mask
-        pos_low_nce = self.low_pro_mlp(pos_low_feature)
-        pos_low_nce = torch.mean(pos_low_nce, dim=0)
+            # get the low frequency and style feature
+            anchor_low = anchor_style
+            anchor_low_feature = self.get_low_style_feature(anchor_low)
+            anchor_mask = self.low_feature_filter(anchor_low_feature)
+            anchor_low_feature = anchor_low_feature * anchor_mask
+            anchor_low_nce = self.low_pro_mlp(anchor_low_feature) # t n c
+            anchor_low_nce = torch.mean(anchor_low_nce, dim=0)
 
-        low_nce_emb = torch.stack([anchor_low_nce, pos_low_nce], dim=1) # B 2 C
-        low_nce_emb = nn.functional.normalize(low_nce_emb, p=2, dim=2)
+            pos_low = pos_style 
+            pos_low_feature = self.get_low_style_feature(pos_low)
+            pos_mask = self.low_feature_filter(pos_low_feature)
+            pos_low_feature = pos_low_feature * pos_mask
+            pos_low_nce = self.low_pro_mlp(pos_low_feature)
+            pos_low_nce = torch.mean(pos_low_nce, dim=0)
+
+            low_nce_emb = torch.stack([anchor_low_nce, pos_low_nce], dim=1) # B 2 C
+            low_nce_emb = nn.functional.normalize(low_nce_emb, p=2, dim=2)
 
         # content encoder
         content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
         content = self.content_encoder(content)
-        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=style.shape[0]).contiguous() # n is batch size
+        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous() # n is batch size
         #content = content.permute(1, 0, 2).contiguous() # t n c
         content = self.add_position1D(content)
         
@@ -162,27 +181,22 @@ class Mix_TR(nn.Module):
         
         return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
     
-    # === [修改] 支援向量輸入 ===
     def generate(self, style, laplace, content):
-        """
-        支援兩種模式:
-        1. 圖片輸入 (Training/Test): 輸入 [N, C, H, W] -> 走完整 CNN Encoder 流程
-        2. 向量輸入 (Random Sampling): 輸入 [N, 512] -> 直接進入 Decoder
-        """
-        
-        # 判斷輸入是否為向量 (N, 512)
         is_vector_input = (style.dim() == 2)
+        # 檢查是否為 Unconditional (Inference 時傳入全零)
+        is_unconditional = (torch.sum(torch.abs(style)) < 1e-6)
+        batch_size = style.shape[0]
 
-        if is_vector_input:
+        if is_unconditional:
+             # === CFG Unconditional Path ===
+             # 擴展 Null Embedding
+             anchor_low_feature = self.null_low_feature.expand(-1, batch_size, -1)
+             anchor_high_feature = self.null_high_feature.expand(-1, batch_size, -1)
+             
+        elif is_vector_input:
             # === Mode 2: Vector Input (from Flow) ===
-            # style 和 laplace 已經是 [N, 512] 的向量
-            # Decoder 需要 Sequence 輸入 [T, N, C]，所以我們將其 unsqueeze 成 [1, N, 512]
-            # 這樣 Transformer 會把它當作長度為 1 的 Global Token 進行 Attention
             anchor_low_feature = style.unsqueeze(0)  # [1, N, 512]
             anchor_high_feature = laplace.unsqueeze(0) # [1, N, 512]
-            
-            # 注意：這裡不需要再過 low_feature_filter，因為 Flow 訓練時使用的 target 
-            # 已經是經過 filter 和 averaging 的向量 (參見 get_style_vectors)
             
         else:
             # === Mode 1: Image Input (Original) ===
@@ -205,7 +219,7 @@ class Mix_TR(nn.Module):
         # content encoder (保持不變)
         content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
         content = self.content_encoder(content)
-        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=style.shape[0]).contiguous() # n is batch size
+        content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous() # n is batch size
         content = self.add_position1D(content)
         
         # fusion of content and style features
