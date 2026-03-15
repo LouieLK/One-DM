@@ -1,3 +1,7 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 import argparse
 from parse_config import cfg, cfg_from_file, assert_and_infer_cfg
 from utils.util import fix_seed, load_specific_dict
@@ -18,6 +22,13 @@ from models.loss import SupConLoss
 
 
 def main(opt):
+    # 🌟 [新增] 解鎖 TF32 算力 (非常重要)
+    torch.set_float32_matmul_precision('high')
+    
+    # 🌟 [新增] 強制 PyTorch 啟用最快的 FlashAttention 引擎
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False) # 關閉慢速的傳統數學運算
+
     """ load config file into cfg"""
     cfg_from_file(opt.cfg_file)
     assert_and_infer_cfg()
@@ -31,27 +42,27 @@ def main(opt):
     local_rank = dist.get_rank()
     torch.cuda.set_device(local_rank)
     device = torch.device(opt.device, local_rank)
-    
+    # 🌟 [新增] 讓 cuDNN 自動尋找最快的卷積演算法 (因為輸入尺寸固定 128x128)
+    torch.backends.cudnn.benchmark = True
     # [修改] 1. 設定全域 Config
     HandwritingDataset.set_global_config(cfg)
 
     """ set dataset"""
     # [修改] 2. 移除路徑參數，改用 split
-    train_dataset = HandwritingDataset(split=cfg.TRAIN.TYPE)
-    
+    train_dataset = HandwritingDataset(split=cfg.TRAIN.TYPE, use_latent=True)
+    test_dataset = HandwritingDataset(split=cfg.TEST.TYPE, use_latent=True)
     print('number of training images: ', len(train_dataset))
     train_sampler = DistributedSampler(train_dataset)
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                batch_size=cfg.TRAIN.IMS_PER_BATCH,
-                                               drop_last=False,
+                                               drop_last=True,           # 🌟 [修改] 強烈建議改為 True
                                                collate_fn=train_dataset.collate_fn_,
                                                num_workers=cfg.DATA_LOADER.NUM_THREADS,
-                                               pin_memory=True,
-                                               sampler=train_sampler)
-    
-    
+                                               pin_memory=True,          # 保持 True
+                                               sampler=train_sampler,    # 保持不變 (DDP 專用)
+                                               prefetch_factor=4,        # 🌟 [新增] 提速大招：預讀機制
+                                               persistent_workers=False)  # 🌟 [新增] 提速大招：常駐工人
     # [修改] 3. 測試集同理
-    test_dataset = HandwritingDataset(split=cfg.TEST.TYPE)
     test_sampler = DistributedSampler(test_dataset)
 
     test_loader = torch.utils.data.DataLoader(test_dataset,
@@ -67,8 +78,11 @@ def main(opt):
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
                      attention_resolutions=cfg.MODEL.ATTENTION_RESOLUTIONS, channel_mult=cfg.MODEL.CHANNEL_MULT, num_heads=cfg.MODEL.NUM_HEADS, 
                      context_dim=cfg.MODEL.EMB_DIM,
-                     use_checkpoint=True   # 🌟 [關鍵新增] 開啟梯度檢查點！
                      ).to(device)
+    # 確保 PyTorch 版本支援 compile
+    if hasattr(torch, 'compile'):
+        print("🚀 啟動 torch.compile 加速 U-Net!")
+        unet = torch.compile(unet)
 
     # ----- Pretrained 模型載入 -----
     if len(opt.one_dm) > 0:
@@ -84,7 +98,8 @@ def main(opt):
         print('Loaded pretrained resnet18 model from {}'.format(opt.feat_model))
         
 
-    optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR)
+    # 加入 fused=True
+    optimizer = optim.AdamW(unet.parameters(), lr=cfg.SOLVER.BASE_LR, fused=True)
 
     # ---- Resume Checkpoint if given ----
     start_epoch = 0

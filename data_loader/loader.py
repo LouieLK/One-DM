@@ -17,7 +17,7 @@ class HandwritingDataset(Dataset):
         """設定全域 Config，所有實例化物件皆可共用"""
         cls._global_cfg = cfg
 
-    def __init__(self, cfg=None, split='train', content_type='kaifont'):
+    def __init__(self, cfg=None, split='train', content_type='kaifont', use_latent=False):
         # 1. Config 解析
         if cfg is not None:
             self.cfg = cfg
@@ -31,7 +31,8 @@ class HandwritingDataset(Dataset):
         self.letters = ds_cfg['LETTERS']
         self.max_len = ds_cfg['MAX_LEN']
         self.style_len = ds_cfg['STYLE_LEN']
-        
+        self.use_latent = use_latent # 紀錄雙軌開關
+        self.latent_path = os.path.join(self.root, ds_cfg['DIRS']['IMAGE'] + '_latents', split)
         txt_path = os.path.join(self.root, ds_cfg['FILES'][split])
         self.data_dict = self.load_data(txt_path)
         # 2. 路徑設定
@@ -124,15 +125,21 @@ class HandwritingDataset(Dataset):
         label = self.data_dict[self.indices[idx]]['label']
         wr_id = self.data_dict[self.indices[idx]]['s_id']
         transcr = label
-        img_path = os.path.join(self.image_path, wr_id, image_name)
-        image = Image.open(img_path).convert('RGB')
-        image = self.transforms(image)
-
+        # 🌟 [關鍵修復] 將 "001" 轉成 1 再轉回 "1"，確保與抽出 Latent 的資料夾名稱完全吻合
+        latent_wr_id = str(int(wr_id)) 
+        latent_file = os.path.join(self.latent_path, latent_wr_id, image_name.replace('.png', '.npy'))
+        # 雙軌制：開啟開關且檔案存在，就讀取 Latent
+        if self.use_latent and os.path.exists(latent_file):
+            img_tensor = torch.from_numpy(np.load(latent_file)).float()
+        else:
+            img_path = os.path.join(self.image_path, wr_id, image_name)
+            image = Image.open(img_path).convert('RGB')
+            img_tensor = self.transforms(image)
         style_ref, laplace_ref = self.get_style_ref(wr_id)
         style_ref = torch.from_numpy(style_ref).to(torch.float32) # [2, h , w] achor and positive
         laplace_ref = torch.from_numpy(laplace_ref).to(torch.float32) # [2, h , w] achor and positive
 
-        return {'img':image,
+        return {'img':img_tensor,
                 'content':label, 
                 'style':style_ref,
                 "laplace":laplace_ref,
@@ -155,7 +162,10 @@ class HandwritingDataset(Dataset):
         else:
             max_s_width = self.style_len
 
-        imgs = torch.ones([len(batch), batch[0]['img'].shape[0], batch[0]['img'].shape[1], max(width)], dtype=torch.float32)
+        is_latent = batch[0]['img'].shape[0] == 4
+        pad_val = 0.0 if is_latent else 1.0
+        
+        imgs = torch.full([len(batch), batch[0]['img'].shape[0], batch[0]['img'].shape[1], max(width)], fill_value=pad_val, dtype=torch.float32)
         c_h, c_w = self.con_symbols.shape[-2], self.con_symbols.shape[-1]
         content_ref = torch.zeros([len(batch), max(c_width), c_h , c_w], dtype=torch.float32)
         

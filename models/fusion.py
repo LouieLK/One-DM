@@ -73,7 +73,7 @@ class Mix_TR(nn.Module):
             # [新增] 無論輸入的字型圖片多大，都強制提取全局結構特徵為 1x1
             nn.AdaptiveAvgPool2d((1, 1)), 
             # [新增] 完美將 ResNet 的 256 通道映射到您在 YAML 設定的 EMB_DIM (d_model)
-            nn.Conv2d(256, self.d_model, kernel_size=1) 
+            nn.Conv2d(512, self.d_model, kernel_size=1) 
         )
 
     def _reset_parameters(self):
