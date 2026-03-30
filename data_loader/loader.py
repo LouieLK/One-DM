@@ -51,7 +51,24 @@ class HandwritingDataset(Dataset):
         self.con_symbols = self.get_symbols(content_type)
         self.laplace = torch.tensor([[0, 1, 0],[1, -4, 1],[0, 1, 0]], dtype=torch.float
                                     ).to(torch.float32).view(1, 1, 3, 3).contiguous()
-
+        self.split = split
+        if self.split == 'train':
+            self.content_aug = torchvision.transforms.Compose([
+                # 注意：這裡處理的是浮點數 Tensor，且背景為 0，字體為 1
+                torchvision.transforms.RandomAffine(
+                    degrees=5, 
+                    translate=(0.05, 0.05), 
+                    scale=(0.95, 1.05), 
+                    fill=0.0   # 旋轉平移後，用背景值(0)填補空隙
+                ),
+                torchvision.transforms.RandomErasing(
+                    p=0.5,     # 50% 機率觸發挖空 (破除死背的大招)
+                    scale=(0.02, 0.1), 
+                    value=0.0  # 挖空的區域填上背景值(0)
+                )
+            ])
+        else:
+            self.content_aug = None
 
 
     def load_data(self, data_path):
@@ -181,6 +198,17 @@ class HandwritingDataset(Dataset):
             try:
                 content = [self.letter2index[i] for i in item['content']]
                 content = self.con_symbols[content]
+                
+                # 🌟 [新增] 對 Content Tensor 進行資料增強
+                if hasattr(self, 'content_aug') and self.content_aug is not None:
+                    aug_content = []
+                    # 逐字元進行增強，確保每個字的扭曲與挖空是獨立的
+                    for c_tensor in content:
+                        # 將 [H, W] 擴展為 [1, H, W] 以符合 torchvision 要求的通道維度
+                        c_aug = self.content_aug(c_tensor.unsqueeze(0)).squeeze(0)
+                        aug_content.append(c_aug)
+                    content = torch.stack(aug_content)
+
                 content_ref[idx, :len(content)] = content
             except:
                 print('content', item['content'])

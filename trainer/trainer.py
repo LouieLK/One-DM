@@ -316,6 +316,7 @@ class Trainer:
         # 2. 準備要生成的文字列表
         load_content = ContentData()
         # 這裡可以自訂想要測試的字，或者隨機選取
+        unseen = '啄着灼浊兹孜紫仔滓自总'
         if hasattr(load_content, 'letters') and len(load_content.letters) >= 5:
             # 隨機選 5 個字來測試
             selected_texts = random.sample(load_content.letters, 5) 
@@ -323,6 +324,7 @@ class Trainer:
             # 如果讀不到 letters，就用預設的
             selected_texts = ['永', '和', '九', '年', '歲']
 
+        selected_texts.extend(unseen)
         print(f"Validation Generating Texts: {selected_texts}")
 
         for text in selected_texts:
