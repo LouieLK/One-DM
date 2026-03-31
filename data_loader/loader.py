@@ -226,6 +226,39 @@ class HandwritingDataset(Dataset):
                 print('style', item['style'].shape)
 
         wid = torch.tensor([item['wid'] for item in batch])
+        content_ref = 1.0 - content_ref  # invert the image
+
+        content_masked = content_ref.clone()
+
+        # Mask only one valid character in each sample, with 30% probability
+        for i in range(len(batch)):
+            if random.random() < 0.3 and c_width[i] > 0:
+                j = random.randint(0, c_width[i] - 1)
+
+                h = c_h
+                w = c_w
+
+                mh = max(1, random.randint(h // 4, h // 2))
+                mw = max(1, random.randint(w // 4, w // 2))
+
+                yy = random.randint(0, h - mh)
+                xx = random.randint(0, w - mw)
+
+                # Use 1.0 as the fill value because content is inverted above.
+                # If your visual check shows the background is reversed, change 1.0 to 0.0.
+                content_masked[i, j, yy:yy + mh, xx:xx + mw] = 1.0
+
+        return {
+            'img': imgs,
+            'style': style_ref,
+            'content': content_ref,
+            'content_masked': content_masked,
+            'wid': wid,
+            'laplace': laplace_ref,
+            'target': target,
+            'target_lengths': target_lengths,
+            'image_name': image_name
+        }
         content_ref = 1.0 - content_ref # invert the image
         return {'img':imgs, 'style':style_ref, 'content':content_ref, 'wid':wid, 'laplace':laplace_ref,
                 'target':target, 'target_lengths':target_lengths, 'image_name':image_name}

@@ -40,11 +40,12 @@ class Trainer:
             data['laplace'].to(self.device), \
             data['content'].to(self.device), \
             data['wid'].to(self.device)
-
+        content_masked = data['content_masked']
         # ===== [修改] Classifier-Free Guidance 雙重隨機 Dropout =====
         drop_style = random.random() < 0.1     # 10% 機率丟棄風格
         drop_content = random.random() < 0.1   # 10% 機率丟棄內容
         is_style_uncond = False # 標記旗標
+        drop_content = False
 
         if drop_style:
             style_ref = torch.zeros_like(style_ref)
@@ -66,6 +67,15 @@ class Trainer:
         x_t, noise = self.diffusion.noise_images(images, t)
         
         with autocast(device_type='cuda', dtype=torch.bfloat16):
+            predicted_noise, high_nce_emb, low_nce_emb = self.model(
+                x_t, t, style_ref, laplace_ref, content_ref, tag='train'
+            )
+
+            predicted_noise_masked, _, _ = self.model(
+                x_t, t, style_ref, laplace_ref, content_masked, tag='train'
+            )
+
+            loss_consistency = F.l1_loss(predicted_noise, predicted_noise_masked)
             predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
             # calculate loss
             recon_loss = self.recon_criterion(predicted_noise, noise)
@@ -78,7 +88,7 @@ class Trainer:
                 high_nce_loss = self.nce_criterion(high_nce_emb, labels=wid)
                 low_nce_loss = self.nce_criterion(low_nce_emb, labels=wid)
             
-            loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0)
+            loss = recon_loss + (high_nce_loss * 1.0) + (low_nce_loss * 1.0) + 0.2 * loss_consistency
         # backward and update trainable parameters
         # 找到 self.optimizer.zero_grad() 並替換為：
         self.optimizer.zero_grad(set_to_none=True)
@@ -88,7 +98,7 @@ class Trainer:
         if dist.get_rank() == 0:
             # log file
             loss_dict = {"reconstruct_loss": recon_loss.item(), "high_nce_loss": high_nce_loss.item(),
-                         "low_nce_loss": low_nce_loss.item()}
+                         "low_nce_loss": low_nce_loss.item(),"consistency_loss": loss_consistency.item()}
             self.tb_summary.add_scalars("loss", loss_dict, step)
             self._progress(recon_loss.item(), pbar)
 
