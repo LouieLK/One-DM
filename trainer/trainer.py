@@ -116,7 +116,6 @@ class Trainer:
             self._progress(recon_loss.item(), pbar)
 
         del data, loss
-        torch.cuda.empty_cache()
 
     def _finetune_iter(self, data, step, pbar):
         self.model.train()
@@ -206,7 +205,6 @@ class Trainer:
             self._progress(recon_loss.item(), pbar)
 
         del data, loss
-        torch.cuda.empty_cache()
 
     def _save_images(self, images, path):
         grid = torchvision.utils.make_grid(images)
@@ -458,7 +456,6 @@ class Trainer:
             if dist.get_rank() == 0:
                 pbar.close()
             gc.collect() 
-            torch.cuda.empty_cache()
 
     def _progress(self, loss, pbar):
         pbar.set_postfix(mse='%.6f' % (loss))

@@ -60,7 +60,7 @@ def main(opt):
                                                num_workers=cfg.DATA_LOADER.NUM_THREADS,
                                                pin_memory=True,          # 保持 True
                                                sampler=train_sampler,    # 保持不變 (DDP 專用)
-                                               prefetch_factor=4,        # 🌟 [新增] 提速大招：預讀機制
+                                               prefetch_factor=8,        # 🌟 [新增] 提速大招：預讀機制
                                                persistent_workers=False)  # 🌟 [新增] 提速大招：常駐工人
     # [修改] 3. 測試集同理
     test_sampler = DistributedSampler(test_dataset)
