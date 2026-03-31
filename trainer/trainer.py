@@ -40,8 +40,7 @@ class Trainer:
             data['laplace'].to(self.device), \
             data['content'].to(self.device), \
             data['wid'].to(self.device)
-        content_masked = data['content_masked']
-        # ===== [修改] Classifier-Free Guidance 雙重隨機 Dropout =====
+        content_masked = data['content_masked'].to(self.device)        # ===== [修改] Classifier-Free Guidance 雙重隨機 Dropout =====
         drop_style = random.random() < 0.1     # 10% 機率丟棄風格
         drop_content = random.random() < 0.1   # 10% 機率丟棄內容
         is_style_uncond = False # 標記旗標
@@ -65,19 +64,33 @@ class Trainer:
         # forward
         t = self.diffusion.sample_timesteps(images.shape[0]).to(self.device)
         x_t, noise = self.diffusion.noise_images(images, t)
-        
+
+        x_t_double = torch.cat([x_t, x_t], dim=0)
+        t_double = torch.cat([t, t], dim=0)
+        style_double = torch.cat([style_ref, style_ref], dim=0)
+        laplace_double = torch.cat([laplace_ref, laplace_ref], dim=0)
+        content_double = torch.cat([content_ref, content_masked], dim=0)
+
         with autocast(device_type='cuda', dtype=torch.bfloat16):
-            predicted_noise, high_nce_emb, low_nce_emb = self.model(
-                x_t, t, style_ref, laplace_ref, content_ref, tag='train'
+            # ==========================================
+            # 2. 只做「一次」前向傳播！徹底杜絕內部 Inplace 覆蓋
+            # ==========================================
+            preds_double, high_nce_double, low_nce_double = self.model(
+                x_t_double, t_double, style_double, laplace_double, content_double, tag='train'
             )
 
-            predicted_noise_masked, _, _ = self.model(
-                x_t, t, style_ref, laplace_ref, content_masked, tag='train'
-            )
-
-            loss_consistency = F.l1_loss(predicted_noise, predicted_noise_masked)
-            predicted_noise, high_nce_emb, low_nce_emb = self.model(x_t, t, style_ref, laplace_ref, content_ref, tag='train')
-            # calculate loss
+            # ==========================================
+            # 3. 將輸出的結果切回兩半 (前半是 ref，後半是 masked)
+            # ==========================================
+            predicted_noise, predicted_noise_masked = preds_double.chunk(2, dim=0)
+            
+            # NCE embedding 我們只需要算前半段 (ref) 的 loss，後半段丟棄即可
+            high_nce_emb, _ = high_nce_double.chunk(2, dim=0) 
+            low_nce_emb, _ = low_nce_double.chunk(2, dim=0)
+            # ==========================================
+            # 4. 計算 Loss
+            # ==========================================
+            loss_consistency = F.l1_loss(predicted_noise_masked, predicted_noise.detach())
             recon_loss = self.recon_criterion(predicted_noise, noise)
             
             if is_style_uncond:
@@ -326,10 +339,10 @@ class Trainer:
         # 2. 準備要生成的文字列表
         load_content = ContentData()
         # 這裡可以自訂想要測試的字，或者隨機選取
-        unseen = '啄着灼浊兹孜紫仔滓自总'
+        unseen = '着紫仔自总'
         if hasattr(load_content, 'letters') and len(load_content.letters) >= 5:
             # 隨機選 5 個字來測試
-            selected_texts = random.sample(load_content.letters, 5) 
+            selected_texts = random.sample(load_content.letters, 3) 
         else:
             # 如果讀不到 letters，就用預設的
             selected_texts = ['永', '和', '九', '年', '歲']
