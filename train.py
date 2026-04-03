@@ -4,7 +4,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 import argparse
 from parse_config import cfg, cfg_from_file, assert_and_infer_cfg
-from utils.util import fix_seed, load_specific_dict
+from utils.util import fix_seed
 from utils.logger import set_log
 from data_loader.loader import HandwritingDataset 
 import torch
@@ -13,11 +13,7 @@ from models.unet import UNetModel
 from torch import optim
 import torch.nn as nn
 from models.diffusion import Diffusion, EMA
-import copy
 from diffusers import AutoencoderKL
-from torch.utils.data.distributed import DistributedSampler
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from models.loss import SupConLoss
 
 
@@ -37,11 +33,8 @@ def main(opt):
     """ prepare log file """
     logs = set_log(cfg.OUTPUT_DIR, opt.cfg_file, opt.log_name)
 
-    """ set mulit-gpu """
-    dist.init_process_group(backend='nccl')
-    local_rank = dist.get_rank()
-    torch.cuda.set_device(local_rank)
-    device = torch.device(opt.device, local_rank)
+    """ set single-gpu """
+    device = torch.device(opt.device)
     # 🌟 [新增] 讓 cuDNN 自動尋找最快的卷積演算法 (因為輸入尺寸固定 128x128)
     torch.backends.cudnn.benchmark = True
     # [修改] 1. 設定全域 Config
@@ -52,18 +45,17 @@ def main(opt):
     train_dataset = HandwritingDataset(split=cfg.TRAIN.TYPE, use_latent=True)
     test_dataset = HandwritingDataset(split=cfg.TEST.TYPE, use_latent=True)
     print('number of training images: ', len(train_dataset))
-    train_sampler = DistributedSampler(train_dataset)
+    # === 修改後的程式碼 ===
+    # 移除 train_sampler 和 test_sampler
     train_loader = torch.utils.data.DataLoader(train_dataset,
                                                batch_size=cfg.TRAIN.IMS_PER_BATCH,
-                                               drop_last=True,           # 🌟 [修改] 強烈建議改為 True
+                                               drop_last=True,           
                                                collate_fn=train_dataset.collate_fn_,
                                                num_workers=cfg.DATA_LOADER.NUM_THREADS,
-                                               pin_memory=True,          # 保持 True
-                                               sampler=train_sampler,    # 保持不變 (DDP 專用)
-                                               prefetch_factor=8,        # 🌟 [新增] 提速大招：預讀機制
-                                               persistent_workers=False)  # 🌟 [新增] 提速大招：常駐工人
-    # [修改] 3. 測試集同理
-    test_sampler = DistributedSampler(test_dataset)
+                                               pin_memory=True,          
+                                               shuffle=True,             # 🌟 改為 shuffle=True
+                                               prefetch_factor=8,        
+                                               persistent_workers=False) 
 
     test_loader = torch.utils.data.DataLoader(test_dataset,
                                               batch_size=cfg.TEST.IMS_PER_BATCH,
@@ -71,7 +63,7 @@ def main(opt):
                                               collate_fn=test_dataset.collate_fn_,
                                               pin_memory=True,
                                               num_workers=cfg.DATA_LOADER.NUM_THREADS,
-                                              sampler=test_sampler)
+                                              shuffle=False)             # 🌟 測試集不需要 shuffle
 
     # ----- 模型定義 -----
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
@@ -114,7 +106,6 @@ def main(opt):
             unet.load_state_dict(resume_data)
             print(f"⚠️  Loaded old-style checkpoint (only model weights) from {opt.resume_ckpt}")
 
-    unet = DDP(unet, device_ids=[local_rank],find_unused_parameters=True)
     """build criterion and optimizer"""
     criterion = dict(nce=SupConLoss(contrast_mode='all'), recon=nn.MSELoss())
     diffusion = Diffusion(device=device, noise_offset=opt.noise_offset)

@@ -1,14 +1,10 @@
 import torch
 from tensorboardX import SummaryWriter
-import time
 from parse_config import cfg
 import os
-import sys
-from PIL import Image
 import torchvision
 from tqdm import tqdm
 from data_loader.loader import ContentData
-import torch.distributed as dist
 import torch.nn.functional as F
 import random
 from torch.amp import autocast
@@ -108,12 +104,11 @@ class Trainer:
         loss.backward()
         self.optimizer.step()
 
-        if dist.get_rank() == 0:
-            # log file
-            loss_dict = {"reconstruct_loss": recon_loss.item(), "high_nce_loss": high_nce_loss.item(),
-                         "low_nce_loss": low_nce_loss.item(),"consistency_loss": loss_consistency.item()}
-            self.tb_summary.add_scalars("loss", loss_dict, step)
-            self._progress(recon_loss.item(), pbar)
+        # log file
+        loss_dict = {"reconstruct_loss": recon_loss.item(), "high_nce_loss": high_nce_loss.item(),
+                        "low_nce_loss": low_nce_loss.item(),"consistency_loss": loss_consistency.item()}
+        self.tb_summary.add_scalars("loss", loss_dict, step)
+        self._progress(recon_loss.item(), pbar)
 
         del data, loss
 
@@ -194,15 +189,14 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), cfg.SOLVER.GRAD_L2_CLIP)
         self.optimizer.step()
 
-        if dist.get_rank() == 0:
-            loss_dict = {
-                "reconstruct_loss": recon_loss.item(), 
-                "high_nce_loss": high_nce_loss.item(),
-                "low_nce_loss": low_nce_loss.item(), 
-                "ctc_loss": ctc_loss.item()
-            }
-            self.tb_summary.add_scalars("loss", loss_dict, step)
-            self._progress(recon_loss.item(), pbar)
+        loss_dict = {
+            "reconstruct_loss": recon_loss.item(), 
+            "high_nce_loss": high_nce_loss.item(),
+            "low_nce_loss": low_nce_loss.item(), 
+            "ctc_loss": ctc_loss.item()
+        }
+        self.tb_summary.add_scalars("loss", loss_dict, step)
+        self._progress(recon_loss.item(), pbar)
 
         del data, loss
 
@@ -304,14 +298,13 @@ class Trainer:
         avg_ctc = total_ctc / count
         
         # 寫入 Tensorboard
-        if dist.get_rank() == 0:
-            val_dict = {
-                "val_total_loss": avg_loss,
-                "val_recon": avg_recon,
-                "val_ctc": avg_ctc
-            }
-            self.tb_summary.add_scalars("validation", val_dict, epoch)
-            print(f"\n[Validation] Epoch {epoch} | Total: {avg_loss:.4f} | Recon: {avg_recon:.4f} | CTC: {avg_ctc:.4f}")
+        val_dict = {
+            "val_total_loss": avg_loss,
+            "val_recon": avg_recon,
+            "val_ctc": avg_ctc
+        }
+        self.tb_summary.add_scalars("validation", val_dict, epoch)
+        print(f"\n[Validation] Epoch {epoch} | Total: {avg_loss:.4f} | Recon: {avg_recon:.4f} | CTC: {avg_ctc:.4f}")
             
         return avg_loss
     
@@ -349,7 +342,6 @@ class Trainer:
         print(f"Validation Generating Texts: {selected_texts}")
 
         for text in selected_texts:
-            rank = dist.get_rank()
             
             # 取得 Content Reference (字形內容)
             try:
@@ -391,7 +383,7 @@ class Trainer:
             comparison = torch.cat([style_vis, preds.cpu()], dim=3)
             
             # 6. 存檔
-            out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}-process-{rank}.png")
+            out_path = os.path.join(self.save_sample_dir, f"epoch-{epoch}-{text}.png")
             self._save_images(comparison, out_path)
             # print(f"Saved validation image to {out_path}")
 
@@ -399,21 +391,14 @@ class Trainer:
         best_val_loss = float('inf')
         """start training iterations"""
         for epoch in range(start_epoch,cfg.SOLVER.EPOCHS):
-            self.data_loader.sampler.set_epoch(epoch)
-            print(f"Epoch:{epoch} of process {dist.get_rank()}")
-            dist.barrier()
-            if dist.get_rank() == 0:
-                pbar = tqdm(self.data_loader, leave=False)
-            else:
-                pbar = self.data_loader
-
+            print(f"Epoch:{epoch}")
+            pbar = tqdm(self.data_loader, leave=False)
             for step, data in enumerate(pbar):
                 total_step = epoch * len(self.data_loader) + step
                 if self.ocr_model is not None:
                     self._finetune_iter(data, total_step, pbar)
                     if (total_step+1) > cfg.TRAIN.SNAPSHOT_BEGIN and (total_step+1) % cfg.TRAIN.SNAPSHOT_ITERS == 0:
-                        if dist.get_rank() == 0:
-                            self._save_checkpoint(total_step)
+                        self._save_checkpoint(total_step)
                     else:
                         pass
                     if self.valid_data_loader is not None:
@@ -424,11 +409,9 @@ class Trainer:
                 else:
                     self._train_iter(data, total_step, pbar)
 
+
             if (epoch+1) > cfg.TRAIN.SNAPSHOT_BEGIN and (epoch+1) % cfg.TRAIN.SNAPSHOT_ITERS == 0:
-                if dist.get_rank() == 0:
-                    self._save_checkpoint(epoch)
-                else:
-                    pass
+                self._save_checkpoint(epoch)
             if self.valid_data_loader is not None:
                 if (epoch+1) > cfg.TRAIN.VALIDATE_BEGIN  and (epoch+1) % cfg.TRAIN.VALIDATE_ITERS == 0:
                     self._valid_iter(epoch)
@@ -453,8 +436,7 @@ class Trainer:
             else:
                 pass
 
-            if dist.get_rank() == 0:
-                pbar.close()
+            pbar.close()
             gc.collect() 
 
     def _progress(self, loss, pbar):
@@ -463,7 +445,7 @@ class Trainer:
     def _save_checkpoint(self, epoch):
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.module.state_dict(),
+            'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
         }
         ckpt_path = os.path.join(self.save_model_dir, f'{epoch}-ckpt.pt')
