@@ -792,16 +792,29 @@ class UNetModel(nn.Module):
         else:
             self.mix_net = Mix_TR(d_model=context_dim,num_encoder_layers=self.num_encoder_layers)
             print("Using Standard ResNet18 Backbone")
+        # ==================== [新增] 內容空間映射網路 ====================
+        # 將 (B, 1, 64, 64) 的印刷字圖片，降採樣 3 次變成 (B, in_channels, 8, 8)
+        self.content_proj = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1), # 64 -> 32
+            nn.SiLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1), # 32 -> 16
+            nn.SiLU(),
+            nn.Conv2d(64, in_channels, kernel_size=4, stride=2, padding=1) # 16 -> 8
+        )
 
-        #==================== INPUT BLOCK ====================
+        # ==================== INPUT BLOCK ====================
 
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
+                    # [修改] 將原本的 in_channels 改為 in_channels * 2 (因為等等會拼接 x 和 content)
+                    conv_nd(dims, in_channels * 2, model_channels, 3, padding=1)
                 )
             ]
         )
+        #==================== INPUT BLOCK ====================
         self._feature_size = model_channels
         input_block_chans = [model_channels]
         ch = model_channels
@@ -999,7 +1012,26 @@ class UNetModel(nn.Module):
             context, high_nce_emb, low_nce_emb = self.mix_net(style, laplace, content)
         else:
             context = self.mix_net.generate(style, laplace, content)
-        h = x.type(self.dtype)
+
+        if content is not None:
+            # [進階修正] 支援 MAX_LEN > 1 的長句拼接
+            # 將 (B, T, H, W) 轉換為 (B, 1, H, T*W) 橫向長圖
+            B, T_len, H_c, W_c = content.shape
+            content_img = content.transpose(1, 2).reshape(B, 1, H_c, T_len * W_c)
+            
+            is_content_uncond = (torch.sum(torch.abs(content_img)) < 1e-6)
+            
+            if is_content_uncond:
+                c_feat = torch.zeros_like(x)
+            else:
+                # [關鍵修正] 確保輸入 CNN 的型別與 x_t 一致 (解決 FP16/BF16 報錯)
+                c_feat = self.content_proj(content_img.type(self.dtype))
+            
+            h = torch.cat([x, c_feat], dim=1)
+        else:
+            h = torch.cat([x, torch.zeros_like(x)], dim=1)
+            
+        h = h.type(self.dtype)
         
         #INPUT BLOCKS
         for module in self.input_blocks:

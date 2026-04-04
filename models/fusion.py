@@ -65,16 +65,18 @@ class Mix_TR(nn.Module):
         # 🌟 [新增] 將 ResNet 輸出的 512 維投影到您設定的 EMB_DIM
         self.freq_proj = nn.Conv2d(512, self.d_model, kernel_size=1)
 
-        ### content encoder
-        # self.content_encoder = nn.Sequential(*([nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)] +list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]))
-        self.content_encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
-            *list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2],
-            # [新增] 無論輸入的字型圖片多大，都強制提取全局結構特徵為 1x1
-            nn.AdaptiveAvgPool2d((1, 1)), 
-            # [新增] 完美將 ResNet 的 256 通道映射到您在 YAML 設定的 EMB_DIM (d_model)
-            nn.Conv2d(512, self.d_model, kernel_size=1) 
-        )
+        # ### content encoder
+        # # self.content_encoder = nn.Sequential(*([nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)] +list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2]))
+        # self.content_encoder = nn.Sequential(
+        #     nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False),
+        #     *list(models.resnet18(weights='ResNet18_Weights.DEFAULT').children())[1:-2],
+        #     # [新增] 無論輸入的字型圖片多大，都強制提取全局結構特徵為 1x1
+        #     nn.AdaptiveAvgPool2d((1, 1)), 
+        #     # [新增] 完美將 ResNet 的 256 通道映射到您在 YAML 設定的 EMB_DIM (d_model)
+        #     nn.Conv2d(512, self.d_model, kernel_size=1) 
+        # )
+
+        self.style_query = nn.Parameter(torch.randn(1, 1, self.d_model))
 
     def _reset_parameters(self):
         for p in self.parameters():
@@ -192,26 +194,39 @@ class Mix_TR(nn.Module):
             low_nce_emb = torch.stack([anchor_low_nce, pos_low_nce], dim=1) # B 2 C
             low_nce_emb = nn.functional.normalize(low_nce_emb, p=2, dim=2)
 
-        # =========== [修改後] 加入 Unconditional 判斷 ===========
-        is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        # =========== [修改後] 移除 Content Encoder 的處理 ===========
         t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
         
-        if is_content_uncond:
-            # CFG Content Unconditional Path
-            # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
-            content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
-        else:
-            # 正常處理路徑
-            content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
-            content = self.content_encoder(content)
-            content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
-            content_feat = self.add_position1D(content)
+        # 直接使用我們定義好的 style_query 擴展到對應的 batch_size
+        # 這樣 decoder 就會純粹輸出「風格」的 Context
+        content_feat = self.style_query.expand(t_len, batch_size, -1)
         
         # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
         style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
         return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
+
+        # # =========== [修改後] 加入 Unconditional 判斷 ===========
+        # is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        # t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
+        
+        # if is_content_uncond:
+        #     # CFG Content Unconditional Path
+        #     # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
+        #     content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
+        # else:
+        #     # 正常處理路徑
+        #     content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
+        #     content = self.content_encoder(content)
+        #     content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
+        #     content_feat = self.add_position1D(content)
+        
+        # # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+        # style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
+        # hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
+        
+        # return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
     
     def generate(self, style, laplace, content):
         is_vector_input = (style.dim() == 2)
@@ -252,23 +267,34 @@ class Mix_TR(nn.Module):
             anchor_mask = self.low_feature_filter(anchor_low_feature)
             anchor_low_feature = anchor_low_feature * anchor_mask
 
-        # =========== [修改後] 加入 Unconditional 判斷 ===========
-        is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        # =========== [修改後] 移除 Content Encoder 的處理 ===========
         t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
         
-        if is_content_uncond:
-            # CFG Content Unconditional Path
-            # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
-            content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
-        else:
-            # 正常處理路徑
-            content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
-            content = self.content_encoder(content)
-            content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
-            content_feat = self.add_position1D(content)
+        # 同樣使用 style_query
+        content_feat = self.style_query.expand(t_len, batch_size, -1)
         
         # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
         style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
         return hs[0].permute(1, 0, 2).contiguous()
+        # # =========== [修改後] 加入 Unconditional 判斷 ===========
+        # is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+        # t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
+        
+        # if is_content_uncond:
+        #     # CFG Content Unconditional Path
+        #     # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
+        #     content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
+        # else:
+        #     # 正常處理路徑
+        #     content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
+        #     content = self.content_encoder(content)
+        #     content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
+        #     content_feat = self.add_position1D(content)
+        
+        # # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+        # style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
+        # hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
+        
+        # return hs[0].permute(1, 0, 2).contiguous()

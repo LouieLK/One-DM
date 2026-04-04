@@ -52,23 +52,23 @@ class HandwritingDataset(Dataset):
         self.laplace = torch.tensor([[0, 1, 0],[1, -4, 1],[0, 1, 0]], dtype=torch.float
                                     ).to(torch.float32).view(1, 1, 3, 3).contiguous()
         self.split = split
-        if self.split == 'train':
-            self.content_aug = torchvision.transforms.Compose([
-                # 注意：這裡處理的是浮點數 Tensor，且背景為 0，字體為 1
-                torchvision.transforms.RandomAffine(
-                    degrees=5, 
-                    translate=(0.05, 0.05), 
-                    scale=(0.95, 1.05), 
-                    fill=0.0   # 旋轉平移後，用背景值(0)填補空隙
-                ),
-                torchvision.transforms.RandomErasing(
-                    p=0.5,     # 50% 機率觸發挖空 (破除死背的大招)
-                    scale=(0.02, 0.1), 
-                    value=0.0  # 挖空的區域填上背景值(0)
-                )
-            ])
-        else:
-            self.content_aug = None
+        # if self.split == 'train':
+        #     self.content_aug = torchvision.transforms.Compose([
+        #         # 注意：這裡處理的是浮點數 Tensor，且背景為 0，字體為 1
+        #         torchvision.transforms.RandomAffine(
+        #             degrees=5, 
+        #             translate=(0.05, 0.05), 
+        #             scale=(0.95, 1.05), 
+        #             fill=0.0   # 旋轉平移後，用背景值(0)填補空隙
+        #         ),
+        #         torchvision.transforms.RandomErasing(
+        #             p=0.5,     # 50% 機率觸發挖空 (破除死背的大招)
+        #             scale=(0.02, 0.1), 
+        #             value=0.0  # 挖空的區域填上背景值(0)
+        #         )
+        #     ])
+        # else:
+        #     self.content_aug = None
 
 
     def load_data(self, data_path):
@@ -228,38 +228,37 @@ class HandwritingDataset(Dataset):
         wid = torch.tensor([item['wid'] for item in batch])
         content_ref = 1.0 - content_ref  # invert the image
 
-        content_masked = content_ref.clone()
+        # content_masked = content_ref.clone()
 
-        # Mask only one valid character in each sample, with 30% probability
-        for i in range(len(batch)):
-            if random.random() < 0.3 and c_width[i] > 0:
-                j = random.randint(0, c_width[i] - 1)
+        # # Mask only one valid character in each sample, with 30% probability
+        # for i in range(len(batch)):
+        #     if random.random() < 0.3 and c_width[i] > 0:
+        #         j = random.randint(0, c_width[i] - 1)
 
-                h = c_h
-                w = c_w
+        #         h = c_h
+        #         w = c_w
 
-                mh = max(1, random.randint(h // 4, h // 2))
-                mw = max(1, random.randint(w // 4, w // 2))
+        #         mh = max(1, random.randint(h // 4, h // 2))
+        #         mw = max(1, random.randint(w // 4, w // 2))
 
-                yy = random.randint(0, h - mh)
-                xx = random.randint(0, w - mw)
+        #         yy = random.randint(0, h - mh)
+        #         xx = random.randint(0, w - mw)
 
-                # Use 1.0 as the fill value because content is inverted above.
-                # If your visual check shows the background is reversed, change 1.0 to 0.0.
-                content_masked[i, j, yy:yy + mh, xx:xx + mw] = 1.0
+        #         # Use 1.0 as the fill value because content is inverted above.
+        #         # If your visual check shows the background is reversed, change 1.0 to 0.0.
+        #         content_masked[i, j, yy:yy + mh, xx:xx + mw] = 1.0
 
-        return {
-            'img': imgs,
-            'style': style_ref,
-            'content': content_ref,
-            'content_masked': content_masked,
-            'wid': wid,
-            'laplace': laplace_ref,
-            'target': target,
-            'target_lengths': target_lengths,
-            'image_name': image_name
-        }
-        content_ref = 1.0 - content_ref # invert the image
+        # return {
+        #     'img': imgs,
+        #     'style': style_ref,
+        #     'content': content_ref,
+        #     'content_masked': content_masked,
+        #     'wid': wid,
+        #     'laplace': laplace_ref,
+        #     'target': target,
+        #     'target_lengths': target_lengths,
+        #     'image_name': image_name
+        # }
         return {'img':imgs, 'style':style_ref, 'content':content_ref, 'wid':wid, 'laplace':laplace_ref,
                 'target':target, 'target_lengths':target_lengths, 'image_name':image_name}
 
