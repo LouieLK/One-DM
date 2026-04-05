@@ -680,7 +680,37 @@ class QKVAttention(nn.Module):
         return count_flops_attn(model, _x, y)
 
 ##################################################################################
+import torch.nn.init as init
 
+def zero_module(module):
+    """將模組的參數初始化為 0，這是 ControlNet 穩定訓練的核心魔法"""
+    for p in module.parameters():
+        init.zeros_(p)
+    return module
+
+class MultiScaleContentEncoder(nn.Module):
+    def __init__(self, in_channels=1, model_channels=256):
+        super().__init__()
+        # 降採樣 1: 128x128 -> 64x64
+        self.down1 = nn.Sequential(nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1), nn.SiLU())
+        # 降採樣 2: 64x64 -> 32x32
+        self.down2 = nn.Sequential(nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1), nn.SiLU())
+        
+        # Level 1: 32x32 -> 16x16 (對應 U-Net 的 Latent 初始輸入尺寸)
+        self.level_1 = nn.Sequential(nn.Conv2d(64, model_channels, kernel_size=3, stride=2, padding=1), nn.SiLU())
+        # Level 2: 16x16 -> 8x8
+        self.level_2 = nn.Sequential(nn.Conv2d(model_channels, model_channels * 2, kernel_size=3, stride=2, padding=1), nn.SiLU())
+        # Level 3: 8x8 -> 4x4
+        self.level_3 = nn.Sequential(nn.Conv2d(model_channels * 2, model_channels * 4, kernel_size=3, stride=2, padding=1), nn.SiLU())
+
+    def forward(self, x):
+        x = self.down1(x)
+        x = self.down2(x)
+        f1 = self.level_1(x)
+        f2 = self.level_2(f1)
+        f3 = self.level_3(f2)
+        # 回傳不同尺度的特徵字典
+        return {1: f1, 2: f2, 3: f3}
 class UNetModel(nn.Module):
     """
     The full UNet model with attention and timestep embedding.
@@ -792,25 +822,24 @@ class UNetModel(nn.Module):
         else:
             self.mix_net = Mix_TR(d_model=context_dim,num_encoder_layers=self.num_encoder_layers)
             print("Using Standard ResNet18 Backbone")
-        # ==================== [新增] 內容空間映射網路 ====================
-        # 將 (B, 1, 64, 64) 的印刷字圖片，降採樣 3 次變成 (B, in_channels, 8, 8)
-        self.content_proj = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1), # 64 -> 32
-            nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1), # 32 -> 16
-            nn.SiLU(),
-            nn.Conv2d(64, in_channels, kernel_size=4, stride=2, padding=1) # 16 -> 8
-        )
-
-        # ==================== INPUT BLOCK ====================
+        # ==================== [修改] ControlNet-style 多尺度空間引導 ====================
+        # 1. 刪除舊的 self.content_proj
+        # 2. 宣告多尺度提取器
+        self.multi_scale_content = MultiScaleContentEncoder(in_channels=1, model_channels=model_channels)
+        
+        # 3. 宣告零卷積 (Zero-Convolutions)，將特徵平滑注入 U-Net
+        self.zero_convs = nn.ModuleDict({
+            '1': zero_module(nn.Conv2d(model_channels, model_channels, 1)),
+            '2': zero_module(nn.Conv2d(model_channels * 2, model_channels * 2, 1)),
+            '3': zero_module(nn.Conv2d(model_channels * 4, model_channels * 4, 1)),
+        })
+        # ==============================================================================
 
         self.input_blocks = nn.ModuleList(
             [
                 TimestepEmbedSequential(
-                    # [修改] 將原本的 in_channels 改為 in_channels * 2 (因為等等會拼接 x 和 content)
-                    conv_nd(dims, in_channels * 2, model_channels, 3, padding=1)
+                    # [還原] 將上次改的 in_channels * 2 還原回 in_channels (因為我們不拼接了)
+                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
                 )
             ]
         )
@@ -1014,30 +1043,50 @@ class UNetModel(nn.Module):
             context = self.mix_net.generate(style, laplace, content)
 
         if content is not None:
-            # [進階修正] 支援 MAX_LEN > 1 的長句拼接
-            # 將 (B, T, H, W) 轉換為 (B, 1, H, T*W) 橫向長圖
             B, T_len, H_c, W_c = content.shape
             content_img = content.transpose(1, 2).reshape(B, 1, H_c, T_len * W_c)
-            
             is_content_uncond = (torch.sum(torch.abs(content_img)) < 1e-6)
             
-            if is_content_uncond:
-                c_feat = torch.zeros_like(x)
+            if not is_content_uncond:
+                target_h = x.shape[2] * 8
+                target_w = x.shape[3] * 8
+                # 確保 Content 對齊 128x128 (或您的設定檔尺寸)
+                if content_img.shape[2] != target_h or content_img.shape[3] != target_w:
+                    import torch.nn.functional as F
+                    content_img = F.interpolate(content_img, size=(target_h, target_w), mode='bilinear', align_corners=False)
+                
+                # 取得 16x16, 8x8, 4x4 的多尺度特徵
+                c_feats = self.multi_scale_content(content_img.type(self.dtype))
             else:
-                # [關鍵修正] 確保輸入 CNN 的型別與 x_t 一致 (解決 FP16/BF16 報錯)
-                c_feat = self.content_proj(content_img.type(self.dtype))
-            
-            h = torch.cat([x, c_feat], dim=1)
+                c_feats = None
         else:
-            h = torch.cat([x, torch.zeros_like(x)], dim=1)
+            c_feats = None
             
-        h = h.type(self.dtype)
+        # 還原 x_t 的初始狀態 (不再拼接)
+        h = x.type(self.dtype)
+        # =============================================================
         
-        #INPUT BLOCKS
+        hs = []
+        # INPUT BLOCKS 迴圈
         for module in self.input_blocks:
             h = module(h, emb, context)
-            hs.append(h)
-        
+            
+            # ==================== [新增] ControlNet-style 特徵注入 ====================
+            if c_feats is not None:
+                res = h.shape[2]
+                ch = h.shape[1]
+                
+                # 根據當前 U-Net 迴圈到的解析度與通道，精準注入對應的空間特徵
+                if res == (target_h // 8) and ch == self.model_channels:
+                    h = h + self.zero_convs['1'](c_feats[1])
+                elif res == (target_h // 16) and ch == self.model_channels * 2:
+                    h = h + self.zero_convs['2'](c_feats[2])
+                elif res == (target_h // 32) and ch == self.model_channels * 4:
+                    h = h + self.zero_convs['3'](c_feats[3])
+            # ========================================================================
+            
+            hs.append(h)       
+            
         #MIDDLE BLOCK
         h = self.middle_block(h, emb, context)
         
