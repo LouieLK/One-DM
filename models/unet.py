@@ -1067,33 +1067,39 @@ class UNetModel(nn.Module):
         # =============================================================
         
         hs = []
-        # INPUT BLOCKS 迴圈
+        # ==================== [修改 1] INPUT BLOCKS 迴圈 ====================
+        # 這裡恢復成最乾淨的狀態，讓 Encoder 專心處理語義與降採樣
         for module in self.input_blocks:
             h = module(h, emb, context)
-            
-            # ==================== [新增] ControlNet-style 特徵注入 ====================
-            if c_feats is not None:
-                res = h.shape[2]
-                ch = h.shape[1]
-                
-                # 根據當前 U-Net 迴圈到的解析度與通道，精準注入對應的空間特徵
-                if res == (target_h // 8) and ch == self.model_channels:
-                    h = h + self.zero_convs['1'](c_feats[1])
-                elif res == (target_h // 16) and ch == self.model_channels * 2:
-                    h = h + self.zero_convs['2'](c_feats[2])
-                elif res == (target_h // 32) and ch == self.model_channels * 4:
-                    h = h + self.zero_convs['3'](c_feats[3])
-            # ========================================================================
-            
             hs.append(h)       
+        # =================================================================
             
-        #MIDDLE BLOCK
+        # MIDDLE BLOCK
         h = self.middle_block(h, emb, context)
         
-        #OUTPUT BLOCKS
+        # ==================== [修改 2] OUTPUT BLOCKS 迴圈 ====================
+        # 在 Decoder 階段 (準備畫圖時) 進行特徵注入
         for module in self.output_blocks:
-            h = torch.cat([h, hs.pop()], dim=1)
+            # 拿出對應層級的 Encoder 特徵 (Skip Connection)
+            skip_h = hs.pop()
+            
+            # 🌟 [新增] 解碼器多尺度空間注入 🌟
+            if c_feats is not None:
+                res = skip_h.shape[2]
+                ch = skip_h.shape[1]
+                
+                # 將 ControlNet 萃取的楷體特徵，精準疊加到 Skip Connection 上
+                if res == (target_h // 8) and ch == self.model_channels:
+                    skip_h = skip_h + self.zero_convs['1'](c_feats[1])
+                elif res == (target_h // 16) and ch == self.model_channels * 2:
+                    skip_h = skip_h + self.zero_convs['2'](c_feats[2])
+                elif res == (target_h // 32) and ch == self.model_channels * 4:
+                    skip_h = skip_h + self.zero_convs['3'](c_feats[3])
+            
+            # 將疊加了空間引導的 skip_h 與 h 拼接，送給 Decoder 卷積層放大
+            h = torch.cat([h, skip_h], dim=1)
             h = module(h, emb, context)
+        # =================================================================
             
         h = h.type(x.dtype)
         
