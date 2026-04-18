@@ -123,14 +123,15 @@ class Mix_TR(nn.Module):
             anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
 
         anchor_high_feature = self.get_high_style_feature(anchor_high) 
-        high_vec = torch.mean(anchor_high_feature, dim=0) 
+        high_vec = rearrange(anchor_high_feature, 's b c -> b (s c)')
+        # high_vec = torch.mean(anchor_high_feature, dim=0) 
 
         anchor_low = anchor_style
         anchor_low_feature = self.get_low_style_feature(anchor_low)
         anchor_mask = self.low_feature_filter(anchor_low_feature)
         anchor_low_feature = anchor_low_feature * anchor_mask 
-        low_vec = torch.mean(anchor_low_feature, dim=0) 
-        
+        # low_vec = torch.mean(anchor_low_feature, dim=0) 
+        low_vec = rearrange(anchor_low_feature, 's b c -> b (s c)')
         return low_vec, high_vec
 
     
