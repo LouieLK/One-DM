@@ -55,18 +55,29 @@ class DiTBlock(nn.Module):
 
 class VectorFieldDiT(nn.Module):
     """
-    SOTA Flow Matching 模型
-    輸入: x (Noisy Sequence: [B, S, D]), t (Time)
-    輸出: v (Velocity Sequence: [B, S, D])
+    SOTA Content-Conditioned Flow Matching 模型 (空間對齊注入版)
+    輸入: x [B, 64, 512], t [B], content_img [B, 1, 128, 128]
+    輸出: v [B, 64, 512]
     """
-    def __init__(self, seq_len=16, in_dim=512, hidden_dim=1024, num_layers=8, num_heads=16):
+    def __init__(self, seq_len=64, in_dim=512, hidden_dim=1024, num_layers=8, num_heads=16):
         super().__init__()
-        # 1. 特徵投影 & 位置編碼
+        # 1. 雜訊特徵投影
         self.x_embedder = nn.Linear(in_dim, hidden_dim)
-        # 🌟 讓模型知道每個 token 代表哪個空間位置
+        
+        # 🌟 2. [全新加入] Content 空間特徵萃取器
+        # 將 128x128 的骨架圖片壓縮成 8x8 的空間特徵，對齊 64 個 Token
+        self.content_extractor = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=4, stride=4, padding=0),   # 128 -> 32
+            nn.GELU(),
+            nn.Conv2d(64, 256, kernel_size=4, stride=4, padding=0), # 32 -> 8
+            nn.GELU(),
+            nn.Conv2d(256, hidden_dim, kernel_size=1)               # 對齊通道維度
+        )
+        
+        # 位置編碼
         self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, hidden_dim)) 
         
-        # 2. 時間編碼
+        # 3. 時間編碼
         self.t_embedder = nn.Sequential(
             SinusoidalPositionEmbeddings(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
@@ -74,12 +85,12 @@ class VectorFieldDiT(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # 3. DiT Blocks
+        # 4. DiT Blocks
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_dim, num_heads) for _ in range(num_layers)
         ])
 
-        # 4. 輸出層 (AdaLN-Zero)
+        # 5. 輸出層 (AdaLN-Zero)
         self.final_layer = nn.Sequential(
             nn.LayerNorm(hidden_dim, elementwise_affine=False),
             nn.Linear(hidden_dim, in_dim)
@@ -89,28 +100,37 @@ class VectorFieldDiT(nn.Module):
             nn.Linear(hidden_dim, 2 * hidden_dim, bias=True)
         )
 
-    def forward(self, x, t):
-        # x shape: [B, seq_len, in_dim]
-        c = self.t_embedder(t) # [B, hidden_dim]
+    def forward(self, x, t, content_img=None):
+        # 處理時間條件
+        c_time = self.t_embedder(t) 
         
-        # 加上位置編碼
-        x = self.x_embedder(x) + self.pos_embed 
+        # 🌟 處理 Content 條件
+        if content_img is not None:
+            # [B, 1, 128, 128] -> [B, hidden_dim, 8, 8]
+            c_feat = self.content_extractor(content_img)
+            # 拉平空間維度並轉置: [B, hidden_dim, 64] -> [B, 64, hidden_dim]
+            c_tokens = c_feat.flatten(2).transpose(1, 2)
+        else:
+            c_tokens = 0 # 支援無條件生成 (Unconditional)
+        
+        # 🌟 核心：將「雜訊特徵」、「楷體骨架特徵」、「位置編碼」三者完美融合！
+        x = self.x_embedder(x) + c_tokens + self.pos_embed 
         
         for block in self.blocks:
-            x = block(x, c)
+            x = block(x, c_time)
             
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c_time).chunk(2, dim=1)
         x = modulate(self.final_layer[0](x), shift, scale)
         x = self.final_layer[1](x)
         return x
 
 # ==========================================
-# 🚀 採樣器 (不變，但支援 3D 張量)
+# 🚀 採樣器 (新增支援 content_img)
 # ==========================================
 @torch.no_grad()
-def sample_flow_matching(model, z, steps=10):
+def sample_flow_matching(model, z, content_img=None, steps=10):
     model.eval()
-    x = z.clone() # z 的形狀是 [B, seq_len, in_dim]
+    x = z.clone() 
     times = torch.linspace(0.0, 1.0, steps + 1, device=z.device)
     
     for i in range(steps):
@@ -118,7 +138,8 @@ def sample_flow_matching(model, z, steps=10):
         t_next = times[i+1]
         dt = t_next - t_curr
         
-        t = torch.full((z.shape[0],), t_curr, device=z.device)
-        v = model(x, t) # 預測速度場
+        t_tensor = torch.full((z.shape[0],), t_curr, device=z.device)
+        # 🌟 採樣時必須帶著骨架資訊
+        v = model(x, t_tensor, content_img) 
         x = x + v * dt 
     return x

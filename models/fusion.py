@@ -122,17 +122,20 @@ class Mix_TR(nn.Module):
             anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
             anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
 
-        anchor_high_feature = self.get_high_style_feature(anchor_high) 
-        high_vec = rearrange(anchor_high_feature, 's b c -> b (s c)')
-        # high_vec = torch.mean(anchor_high_feature, dim=0) 
-
+        anchor_high_feature = self.get_high_style_feature(anchor_high) # [seq_len, batch, 256]
+        
         anchor_low = anchor_style
         anchor_low_feature = self.get_low_style_feature(anchor_low)
         anchor_mask = self.low_feature_filter(anchor_low_feature)
         anchor_low_feature = anchor_low_feature * anchor_mask 
-        # low_vec = torch.mean(anchor_low_feature, dim=0) 
-        low_vec = rearrange(anchor_low_feature, 's b c -> b (s c)')
-        return low_vec, high_vec
+        
+        # 將 Low 和 High 拼接: [seq_len, batch, 512]
+        combined_feature = torch.cat([anchor_low_feature, anchor_high_feature], dim=2)
+        
+        # 🌟 轉換為 Transformer 最喜歡的 [batch_size, seq_len, dim]
+        seq_feature = rearrange(combined_feature, 's b c -> b s c')
+        
+        return seq_feature
 
     
     def forward(self, style, laplace, content):
@@ -230,25 +233,26 @@ class Mix_TR(nn.Module):
         # return hs[0].permute(1, 0, 2).contiguous(), high_nce_emb, low_nce_emb # n t c
     
     def generate(self, style, laplace, content):
-        is_vector_input = (style.dim() == 2)
-        # 檢查是否為 Unconditional (Inference 時傳入全零)
+        is_vector_input = (style.dim() in [2, 3])
         is_style_uncond = (torch.sum(torch.abs(style)) < 1e-6)
         batch_size = style.shape[0]
 
         if is_style_uncond:
              # === CFG Unconditional Path ===
-             # 擴展 Null Embedding
-             # 🌟 [動態計算序列長度]
-            is_vector_input = (style.dim() == 2) if hasattr(style, 'dim') else False
+            is_vector_input = (style.dim() in [2, 3]) if hasattr(style, 'dim') else False
             seq_len = 1 if is_vector_input else (style.shape[2] // 16) * (style.shape[3] // 16)
-            
             anchor_high_feature = self.null_high_feature.expand(seq_len, batch_size, -1)
             anchor_low_feature = self.null_low_feature.expand(seq_len, batch_size, -1)
              
         elif is_vector_input:
-            # === Mode 2: Vector Input (from Flow) ===
-            anchor_low_feature = style.unsqueeze(0)  # [1, N, 512]
-            anchor_high_feature = laplace.unsqueeze(0) # [1, N, 512]
+            # === Mode 2: Vector Input (from SOTA DiT Flow) ===
+            # style 現在是 [batch_size, seq_len, 512]
+            
+            # 1. 轉回 Transformer 要的 [seq_len, batch_size, 512]
+            restored_feature = rearrange(style, 'b s c -> s b c')
+            
+            # 2. 切割回 Low 和 High (前 256 是 Low, 後 256 是 High)
+            anchor_low_feature, anchor_high_feature = torch.chunk(restored_feature, chunks=2, dim=2)
             
         else:
             # === Mode 1: Image Input (Original) ===
@@ -259,43 +263,89 @@ class Mix_TR(nn.Module):
                 anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
                 anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
             
-            # get the high frequency style feature
-            anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
+            anchor_high_feature = self.get_high_style_feature(anchor_high)
             
-            # get the low frequency style feature
             anchor_low = anchor_style
             anchor_low_feature = self.get_low_style_feature(anchor_low)
             anchor_mask = self.low_feature_filter(anchor_low_feature)
             anchor_low_feature = anchor_low_feature * anchor_mask
 
-        # =========== [修改後] 移除 Content Encoder 的處理 ===========
-        t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
-        
-        # 同樣使用 style_query
+        # =========== Decoder 處理 ===========
+        t_len = content.shape[1] 
         content_feat = self.style_query.expand(t_len, batch_size, -1)
         
-        # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
         style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
         hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
         return hs[0].permute(1, 0, 2).contiguous()
-        # # =========== [修改後] 加入 Unconditional 判斷 ===========
-        # is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
-        # t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
+    
+    # def generate(self, style, laplace, content):
+    #     is_vector_input = (style.dim() == 2)
+    #     # 檢查是否為 Unconditional (Inference 時傳入全零)
+    #     is_style_uncond = (torch.sum(torch.abs(style)) < 1e-6)
+    #     batch_size = style.shape[0]
+
+    #     if is_style_uncond:
+    #          # === CFG Unconditional Path ===
+    #          # 擴展 Null Embedding
+    #          # 🌟 [動態計算序列長度]
+    #         is_vector_input = (style.dim() == 2) if hasattr(style, 'dim') else False
+    #         seq_len = 1 if is_vector_input else (style.shape[2] // 16) * (style.shape[3] // 16)
+            
+    #         anchor_high_feature = self.null_high_feature.expand(seq_len, batch_size, -1)
+    #         anchor_low_feature = self.null_low_feature.expand(seq_len, batch_size, -1)
+             
+    #     elif is_vector_input:
+    #         # === Mode 2: Vector Input (from Flow) ===
+    #         anchor_low_feature = style.unsqueeze(0)  # [1, N, 512]
+    #         anchor_high_feature = laplace.unsqueeze(0) # [1, N, 512]
+            
+    #     else:
+    #         # === Mode 1: Image Input (Original) ===
+    #         if style.shape[1] == 1:
+    #             anchor_style = style
+    #             anchor_high = laplace
+    #         else:
+    #             anchor_style = style[:, 0, :, :].unsqueeze(1).contiguous()
+    #             anchor_high = laplace[:, 0, :, :].unsqueeze(1).contiguous()
+            
+    #         # get the high frequency style feature
+    #         anchor_high_feature = self.get_high_style_feature(anchor_high) # t n c
+            
+    #         # get the low frequency style feature
+    #         anchor_low = anchor_style
+    #         anchor_low_feature = self.get_low_style_feature(anchor_low)
+    #         anchor_mask = self.low_feature_filter(anchor_low_feature)
+    #         anchor_low_feature = anchor_low_feature * anchor_mask
+
+    #     # =========== [修改後] 移除 Content Encoder 的處理 ===========
+    #     t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
         
-        # if is_content_uncond:
-        #     # CFG Content Unconditional Path
-        #     # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
-        #     content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
-        # else:
-        #     # 正常處理路徑
-        #     content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
-        #     content = self.content_encoder(content)
-        #     content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
-        #     content_feat = self.add_position1D(content)
+    #     # 同樣使用 style_query
+    #     content_feat = self.style_query.expand(t_len, batch_size, -1)
         
-        # # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
-        # style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
-        # hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
+    #     # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+    #     style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
+    #     hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
         
-        # return hs[0].permute(1, 0, 2).contiguous()
+    #     return hs[0].permute(1, 0, 2).contiguous()
+    #     # # =========== [修改後] 加入 Unconditional 判斷 ===========
+    #     # is_content_uncond = (torch.sum(torch.abs(content)) < 1e-6)
+    #     # t_len = content.shape[1] # 取得序列長度 (也就是 max_len，通常是 1)
+        
+    #     # if is_content_uncond:
+    #     #     # CFG Content Unconditional Path
+    #     #     # 直接使用空殼向量並展開至對應的 sequence_length 與 batch_size
+    #     #     content_feat = self.null_content_feature.expand(t_len, batch_size, -1)
+    #     # else:
+    #     #     # 正常處理路徑
+    #     #     content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()
+    #     #     content = self.content_encoder(content)
+    #     #     content = rearrange(content, '(n t) c h w ->t n (c h w)', n=batch_size).contiguous()
+    #     #     content_feat = self.add_position1D(content)
+        
+    #     # # 把原本傳入 decoder 的 `content` 替換成 `content_feat`
+    #     # style_hs = self.decoder(content_feat, anchor_low_feature, tgt_mask=None)
+    #     # hs = self.fre_decoder(style_hs[0], anchor_high_feature, tgt_mask=None)
+        
+    #     # return hs[0].permute(1, 0, 2).contiguous()
